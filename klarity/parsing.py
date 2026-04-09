@@ -147,14 +147,14 @@ def process_all_settings(
                 sphere_if_aspect_tol=sphere_if_aspect_tol,
                 show_axes=show_axes,
             )
-            save_to_csv(bubble_data, placement, setting, replicate, output_dir)
+            save_to_parquet(bubble_data, placement, setting, replicate, output_dir)
             pbar_overall.update(1)
 
 
 def check_if_processed(placement, setting, replicate, output_dir):
-    """Check if a CSV already exists for a given placement, reactor setting, and replicate."""
+    """Check if a Parquet file already exists for a given placement, reactor setting, and replicate."""
     sanitized_name = f"{placement}_{setting}_{replicate}".replace(" ", "_")
-    output_file = os.path.join(output_dir, f"{sanitized_name}.csv")
+    output_file = os.path.join(output_dir, f"{sanitized_name}.parquet")
     return os.path.exists(output_file)
 
 
@@ -1122,6 +1122,58 @@ def save_to_csv(data, placement, setting, replicate, output_dir):
     output_file = os.path.join(output_dir, f"{sanitized_name}.csv")
     df = pandas.DataFrame(data)
     df.to_csv(output_file, index=False)
+
+
+# Columns written by process_image() that carry no analytical value.
+_PARQUET_DROP_COLS = {
+    "image_path",  # redundant: directory structure + image filename is sufficient
+    "conf_thresh",  # constant per run, lives in config
+    "iou_thresh",  # constant per run, lives in config
+    "mask_binarize_thr",  # constant per run, lives in config
+    "img_w",  # constant, lives in geometry.py
+    "img_h",  # constant, lives in geometry.py
+    "has_overlay",  # process metadata, not science
+    "aspect_method",  # debug string
+}
+
+
+def _optimize_parquet_dtypes(df: pandas.DataFrame) -> pandas.DataFrame:
+    """Downcast numeric columns and categorise low-cardinality strings."""
+    for col in df.columns:
+        dtype = df[col].dtype
+        if dtype == "float64":
+            df[col] = df[col].astype("float32")
+        elif dtype == "int64":
+            col_min, col_max = df[col].min(), df[col].max()
+            if col_min >= 0:
+                if col_max < 255:
+                    df[col] = df[col].astype("uint8")
+                elif col_max < 65_535:
+                    df[col] = df[col].astype("uint16")
+                elif col_max < 4_294_967_295:
+                    df[col] = df[col].astype("uint32")
+            else:
+                if col_min > -128 and col_max < 127:
+                    df[col] = df[col].astype("int8")
+                elif col_min > -32_768 and col_max < 32_767:
+                    df[col] = df[col].astype("int16")
+                elif col_min > -2_147_483_648 and col_max < 2_147_483_647:
+                    df[col] = df[col].astype("int32")
+        elif dtype == "object":
+            if df[col].nunique() / len(df[col]) < 0.5:
+                df[col] = df[col].astype("category")
+    return df
+
+
+def save_to_parquet(data, placement, setting, replicate, output_dir, compression="zstd"):
+    """Save extracted bubble data as a trimmed, typed Parquet file."""
+    os.makedirs(output_dir, exist_ok=True)
+    sanitized_name = f"{placement}_{setting}_{replicate}".replace(" ", "_")
+    output_file = os.path.join(output_dir, f"{sanitized_name}.parquet")
+    df = pandas.DataFrame(data)
+    df = df.drop(columns=[c for c in _PARQUET_DROP_COLS if c in df.columns])
+    df = _optimize_parquet_dtypes(df)
+    df.to_parquet(output_file, engine="pyarrow", compression=compression, index=False)
 
 
 # ============================================================

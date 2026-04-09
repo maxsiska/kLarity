@@ -18,11 +18,8 @@ ROOT = Path(__file__).parent
 # Raw images produced by the endoscope cameras
 IMAGE_DIR = ROOT / "images"
 
-# Per-replicate CSV output from process_images.py
+# Per-replicate Parquet files written by process_images.py
 OUTPUT_DIR = ROOT / "output"
-
-# Per-placement Parquet files (converted from CSV)
-PARQUET_DIR = ROOT / "output_parquet"
 
 # Pre-computed aggregates used by notebooks
 BUBBLE_LEVEL_PKL = ROOT / "data" / "bubble_level_df.pkl"

@@ -277,9 +277,9 @@ def process_all_settings():
                 outer_pbar.update(1)
                 continue
 
-            # Save CSV
+            # Save Parquet
             if bubble_data:
-                parsing.save_to_csv(
+                parsing.save_to_parquet(
                     bubble_data,
                     rep["placement"],
                     rep["setting"],
