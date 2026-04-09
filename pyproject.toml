@@ -1,3 +1,35 @@
+[project]
+name = "klarity"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "matplotlib>=3.9",
+    "opencv-python>=4.10",
+    "tqdm>=4.0",
+    "scipy>=1.10",
+    "openpyxl>=3.1",
+    "ultralytics>=8.3",  # also installs torch and torchvision (CPU build by default)
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "isort",
+    "ruff",
+    "mypy",
+    "pre-commit",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["klarity*"]
+
 [tool.black]
 line-length = 100
 
