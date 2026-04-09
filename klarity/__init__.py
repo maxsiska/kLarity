@@ -1,3 +1,3 @@
-from . import geometry, metrics, parsing, viz
+from . import geometry, io, metrics, parsing, viz
 
-__all__ = ["geometry", "metrics", "parsing", "viz"]
+__all__ = ["geometry", "io", "metrics", "parsing", "viz"]
