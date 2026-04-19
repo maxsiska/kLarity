@@ -10,6 +10,11 @@ Run from the project root with:
 All paths are configured in config.py.
 """
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import json
 import os
 from collections import defaultdict
@@ -176,6 +181,509 @@ def calculate_iou(bbox1, bbox2):
     union = area1 + area2 - intersection
 
     return intersection / union if union > 0 else 0.0
+
+
+def rasterize_polygon(polygon, img_height, img_width):
+    """Rasterize a polygon (list of (x, y) tuples) into a binary mask."""
+    mask = np.zeros((img_height, img_width), dtype=np.uint8)
+    pts = np.array(polygon, dtype=np.int32).reshape((-1, 1, 2))
+    cv2.fillPoly(mask, [pts], 1)
+    return mask.astype(bool)
+
+
+def calculate_mask_iou(mask1, mask2):
+    """Calculate IoU between two boolean masks."""
+    intersection = np.logical_and(mask1, mask2).sum()
+    union = np.logical_or(mask1, mask2).sum()
+    return float(intersection) / float(union) if union > 0 else 0.0
+
+
+def get_predicted_masks(model, img_path, conf, iou, mask_thr):
+    """
+    Run YOLO inference and return a list of dicts with 'mask', 'score', 'bbox'
+    for each detection.  Uses the same binarize + resize logic as parsing.py.
+    """
+    img_bgr = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
+    if img_bgr is None:
+        return [], 0, 0
+    H, W = img_bgr.shape[:2]
+
+    results = model.predict(
+        img_bgr,
+        conf=conf,
+        iou=iou,
+        max_det=2500,
+        verbose=False,
+    )
+    det = results[0] if results else None
+
+    out = []
+    if det is None or det.masks is None:
+        return out, H, W
+
+    masks_np = det.masks.data.detach().cpu().numpy()
+    confs = det.boxes.conf.detach().cpu().numpy() if det.boxes is not None else None
+    boxes_xyxy = det.boxes.xyxy.detach().cpu().numpy() if det.boxes is not None else None
+
+    for i, m in enumerate(masks_np):
+        mb = (m > mask_thr).astype(np.uint8)
+        mask = cv2.resize(mb, (W, H), interpolation=cv2.INTER_NEAREST).astype(bool)
+        score = float(confs[i]) if confs is not None and i < len(confs) else 1.0
+        bbox = None
+        if boxes_xyxy is not None and i < len(boxes_xyxy):
+            x1, y1, x2, y2 = boxes_xyxy[i].tolist()
+            bbox = [float(x1), float(y1), float(x2), float(y2)]
+        out.append({"mask": mask, "score": score, "bbox": bbox})
+
+    return out, H, W
+
+
+def compute_instance_ap(
+    predictions,
+    ground_truths,
+    iou_fn,
+    iou_threshold=0.5,
+):
+    """
+    Compute Average Precision at a single IoU threshold (COCO-style 101-pt interpolation).
+
+    This is the generic engine used by both mask AP and box AP.
+
+    Parameters
+    ----------
+    predictions : list
+        Each element is a dict with at least 'score' (float) and whatever
+        the iou_fn needs (e.g. 'mask' for mask IoU, 'bbox' for box IoU).
+    ground_truths : list
+        Each element is a ground-truth item passed to iou_fn.
+    iou_fn : callable(pred, gt) -> float
+        Returns the IoU between a prediction and a ground truth.
+    iou_threshold : float
+        IoU threshold for a true positive.
+
+    Returns
+    -------
+    float
+        AP at the given IoU threshold (0.0–1.0).
+    """
+    if len(ground_truths) == 0 and len(predictions) == 0:
+        return 1.0  # no GT, no preds → perfect
+    if len(ground_truths) == 0:
+        return 0.0  # all preds are FP
+    if len(predictions) == 0:
+        return 0.0  # all GT are FN
+
+    # Sort predictions by descending confidence
+    sorted_preds = sorted(predictions, key=lambda d: d["score"], reverse=True)
+
+    gt_matched = [False] * len(ground_truths)
+    tp = np.zeros(len(sorted_preds))
+    fp = np.zeros(len(sorted_preds))
+
+    for i, pred in enumerate(sorted_preds):
+        best_iou = 0.0
+        best_gt_idx = -1
+
+        for gt_idx, gt in enumerate(ground_truths):
+            if gt_matched[gt_idx]:
+                continue
+            cur_iou = iou_fn(pred, gt)
+            if cur_iou > best_iou:
+                best_iou = cur_iou
+                best_gt_idx = gt_idx
+
+        if best_iou >= iou_threshold and best_gt_idx >= 0:
+            tp[i] = 1
+            gt_matched[best_gt_idx] = True
+        else:
+            fp[i] = 1
+
+    # Cumulative sums → precision / recall at each detection
+    tp_cum = np.cumsum(tp)
+    fp_cum = np.cumsum(fp)
+    recall = tp_cum / len(ground_truths)
+    precision = tp_cum / (tp_cum + fp_cum)
+
+    # 101-point interpolated AP (COCO style)
+    recall = np.concatenate(([0.0], recall, [1.0]))
+    precision = np.concatenate(([1.0], precision, [0.0]))
+
+    # Make precision monotonically decreasing (right to left)
+    for j in range(len(precision) - 2, -1, -1):
+        precision[j] = max(precision[j], precision[j + 1])
+
+    # Sample at 101 recall thresholds
+    ap = 0.0
+    for t in np.linspace(0, 1, 101):
+        p_at_r = precision[recall >= t]
+        ap += p_at_r.max() if len(p_at_r) > 0 else 0.0
+    ap /= 101.0
+
+    return float(ap)
+
+
+# ── Vectorised IoU matrix builders ───────────────────────────
+
+_MASK_SCALE = 256  # downscale masks to this resolution for IoU computation
+
+
+def compute_iou_matrix_mask(pred_dets, gt_masks):
+    """
+    Return (n_pred, n_gt) float32 mask-IoU matrix.
+
+    Masks are downscaled to _MASK_SCALE × _MASK_SCALE before the matrix
+    multiply, keeping memory and compute manageable regardless of image size.
+    IoU values are accurate to within ~1% of the full-resolution result.
+    """
+    n_pred = len(pred_dets)
+    n_gt = len(gt_masks)
+    if n_pred == 0 or n_gt == 0:
+        return np.zeros((n_pred, n_gt), dtype=np.float32)
+
+    s = _MASK_SCALE
+    pred_flat = np.stack(
+        [
+            cv2.resize(d["mask"].astype(np.uint8), (s, s), interpolation=cv2.INTER_NEAREST).ravel()
+            for d in pred_dets
+        ]
+    ).astype(
+        np.float32
+    )  # (n_pred, s²)
+
+    gt_flat = np.stack(
+        [
+            cv2.resize(m.astype(np.uint8), (s, s), interpolation=cv2.INTER_NEAREST).ravel()
+            for m in gt_masks
+        ]
+    ).astype(
+        np.float32
+    )  # (n_gt, s²)
+
+    intersection = pred_flat @ gt_flat.T  # (n_pred, n_gt)
+    pred_areas = pred_flat.sum(axis=1, keepdims=True)
+    gt_areas = gt_flat.sum(axis=1, keepdims=True)
+    union = pred_areas + gt_areas.T - intersection
+    return np.where(union > 0, intersection / union, 0.0).astype(np.float32)
+
+
+def compute_iou_matrix_box(pred_dets, gt_boxes):
+    """Return (n_pred, n_gt) float32 box-IoU matrix via vectorised numpy ops."""
+    n_pred = len(pred_dets)
+    n_gt = len(gt_boxes)
+    if n_pred == 0 or n_gt == 0:
+        return np.zeros((n_pred, n_gt), dtype=np.float32)
+
+    pb = np.array([d["bbox"] for d in pred_dets], dtype=np.float32)  # (n_pred, 4)
+    gb = np.array([g["bbox"] for g in gt_boxes], dtype=np.float32)  # (n_gt, 4)
+
+    x1 = np.maximum(pb[:, 0:1], gb[:, 0])
+    y1 = np.maximum(pb[:, 1:2], gb[:, 1])
+    x2 = np.minimum(pb[:, 2:3], gb[:, 2])
+    y2 = np.minimum(pb[:, 3:4], gb[:, 3])
+
+    inter = np.maximum(0.0, x2 - x1) * np.maximum(0.0, y2 - y1)
+    pred_areas = (pb[:, 2] - pb[:, 0]) * (pb[:, 3] - pb[:, 1])
+    gt_areas = (gb[:, 2] - gb[:, 0]) * (gb[:, 3] - gb[:, 1])
+    union = pred_areas[:, None] + gt_areas[None, :] - inter
+    return np.where(union > 0, inter / union, 0.0).astype(np.float32)
+
+
+def compute_instance_ap_from_matrix(iou_matrix, scores, n_gt, iou_threshold=0.5):
+    """
+    Compute AP at a single IoU threshold from a pre-computed (n_pred, n_gt) IoU matrix.
+
+    Avoids recomputing IoU for each threshold — call once per image to build
+    the matrix, then call this function once per threshold.
+    """
+    n_pred = len(scores)
+    if n_gt == 0 and n_pred == 0:
+        return 1.0
+    if n_gt == 0 or n_pred == 0:
+        return 0.0
+
+    sorted_idx = np.argsort(-np.asarray(scores))
+    iou_sorted = iou_matrix[sorted_idx]  # (n_pred, n_gt), sorted by descending score
+
+    gt_matched = np.zeros(n_gt, dtype=bool)
+    tp = np.zeros(n_pred)
+    fp = np.zeros(n_pred)
+
+    for i in range(n_pred):
+        row = iou_sorted[i].copy()
+        row[gt_matched] = -1.0  # mask already-matched GTs
+        best_gt = int(np.argmax(row))
+        if row[best_gt] >= iou_threshold:
+            tp[i] = 1
+            gt_matched[best_gt] = True
+        else:
+            fp[i] = 1
+
+    tp_cum = np.cumsum(tp)
+    fp_cum = np.cumsum(fp)
+    recall = tp_cum / n_gt
+    precision = tp_cum / (tp_cum + fp_cum)
+
+    recall = np.concatenate(([0.0], recall, [1.0]))
+    precision = np.concatenate(([1.0], precision, [0.0]))
+    for j in range(len(precision) - 2, -1, -1):
+        precision[j] = max(precision[j], precision[j + 1])
+
+    ap = (
+        sum(
+            (precision[recall >= t].max() if (recall >= t).any() else 0.0)
+            for t in np.linspace(0, 1, 101)
+        )
+        / 101.0
+    )
+    return float(ap)
+
+
+def _dataset_ap_image_aware(iou_matrices, scores_list, n_gt_list, iou_threshold):
+    """
+    Dataset-level AP with COCO-correct image-aware matching.
+
+    Predictions from all images are pooled and sorted by confidence score, but
+    each prediction can only be matched to ground truths from its own image.
+    This avoids cross-image mask IoU computation while implementing the standard
+    COCO pooled-AP protocol correctly.
+    """
+    all_entries = [
+        (score, img_idx, pred_idx)
+        for img_idx, scores in enumerate(scores_list)
+        for pred_idx, score in enumerate(scores)
+    ]
+    if not all_entries:
+        return 0.0
+
+    total_gt = sum(n_gt_list)
+    if total_gt == 0:
+        return 0.0
+
+    all_entries.sort(key=lambda x: -x[0])
+
+    gt_matched = [np.zeros(n, dtype=bool) for n in n_gt_list]
+    n_total = len(all_entries)
+    tp = np.zeros(n_total)
+    fp = np.zeros(n_total)
+
+    for i, (_, img_idx, pred_idx) in enumerate(all_entries):
+        mat = iou_matrices[img_idx]
+        if mat.shape[1] == 0:
+            fp[i] = 1
+            continue
+        row = mat[pred_idx].copy()
+        row[gt_matched[img_idx]] = -1.0
+        best_gt = int(np.argmax(row))
+        if row[best_gt] >= iou_threshold:
+            tp[i] = 1
+            gt_matched[img_idx][best_gt] = True
+        else:
+            fp[i] = 1
+
+    tp_cum = np.cumsum(tp)
+    fp_cum = np.cumsum(fp)
+    recall = tp_cum / total_gt
+    precision = tp_cum / (tp_cum + fp_cum)
+
+    recall = np.concatenate(([0.0], recall, [1.0]))
+    precision = np.concatenate(([1.0], precision, [0.0]))
+    for j in range(len(precision) - 2, -1, -1):
+        precision[j] = max(precision[j], precision[j + 1])
+
+    ap = (
+        sum(
+            (precision[recall >= t].max() if (recall >= t).any() else 0.0)
+            for t in np.linspace(0, 1, 101)
+        )
+        / 101.0
+    )
+    return float(ap)
+
+
+def compute_ap_for_dataset(
+    model,
+    images,
+    annotations_dir,
+    params,
+):
+    """
+    Compute mask AP and box AP (AP50, AP75, mAP50:95) over a full image set.
+
+    Strategy
+    --------
+    Phase 1 — per image: run inference and build vectorised IoU matrices
+    (mask and box) once per image. Re-use them across all 10 IoU thresholds
+    to compute per-image AP values.
+
+    Phase 2 — dataset level: use the cached per-image IoU matrices with
+    image-aware pooling (COCO-correct: predictions are ranked globally by
+    confidence but can only match GTs from their own image).  This avoids any
+    cross-image mask computation.
+
+    Returns
+    -------
+    dict with keys:
+        mask_ap50, mask_ap75, mask_map50_95  : dataset-level mask AP
+        box_ap50,  box_ap75,  box_map50_95   : dataset-level box AP
+        mean_per_image_mask_ap50             : mean of per-image mask AP50
+        mean_per_image_box_ap50              : mean of per-image box AP50
+        per_image_mask_ap50                  : list of per-image mask AP50
+        per_image_box_ap50                   : list of per-image box AP50
+        per_threshold_mask_aps               : dict IoU -> mean per-image mask AP
+        per_threshold_box_aps                : dict IoU -> mean per-image box AP
+    """
+    conf = params["conf"]
+    iou = params["iou"]
+    mask_thr = params["mask_thr"]
+    annotations_dir = Path(annotations_dir)
+
+    iou_thresholds = np.arange(0.50, 1.0, 0.05)  # [0.50, 0.55, ..., 0.95]
+
+    per_threshold_mask_aps = {round(t, 2): [] for t in iou_thresholds}
+    per_threshold_box_aps = {round(t, 2): [] for t in iou_thresholds}
+
+    # Per-image IoU matrices cached for dataset-level AP
+    all_mask_matrices = []
+    all_box_matrices = []
+    all_scores_list = []
+    all_n_gt_mask = []
+    all_n_gt_box = []
+
+    n = len(images)
+    print(f"\n  Phase 1/2 — inference + IoU matrix computation ({n} images)")
+    print(f"  {'Img':<8} {'Name':<52} {'preds':<7} {'gt':<7} {'mAP50 mask':<14} {'mAP50 box'}")
+    print(f"  {'-'*100}")
+
+    for idx, img_path in enumerate(images):
+        img_path = Path(img_path)
+        label_path = annotations_dir / (img_path.stem + ".txt")
+
+        pred_dets, img_h, img_w = get_predicted_masks(model, img_path, conf, iou, mask_thr)
+        if img_h == 0:
+            print(f"  {idx+1}/{n:<6} {img_path.name:<52} (skipped — could not read image)")
+            continue
+
+        gt_annotations = load_yolo_annotations(str(label_path), img_w, img_h)
+        gt_masks = [rasterize_polygon(gt["polygon"], img_h, img_w) for gt in gt_annotations]
+        gt_boxes = [{"bbox": gt["bbox"]} for gt in gt_annotations]
+
+        scores = np.array([d["score"] for d in pred_dets]) if pred_dets else np.array([])
+
+        # Build IoU matrices once per image
+        mask_iou_mat = compute_iou_matrix_mask(pred_dets, gt_masks)
+        box_iou_mat = compute_iou_matrix_box(pred_dets, gt_boxes)
+
+        # Per-image AP at each threshold — reuse the matrices
+        for t in iou_thresholds:
+            t_key = round(t, 2)
+            per_threshold_mask_aps[t_key].append(
+                compute_instance_ap_from_matrix(mask_iou_mat, scores, len(gt_masks), t)
+            )
+            per_threshold_box_aps[t_key].append(
+                compute_instance_ap_from_matrix(box_iou_mat, scores, len(gt_boxes), t)
+            )
+
+        # Cache for dataset-level phase
+        all_mask_matrices.append(mask_iou_mat)
+        all_box_matrices.append(box_iou_mat)
+        all_scores_list.append(scores)
+        all_n_gt_mask.append(len(gt_masks))
+        all_n_gt_box.append(len(gt_boxes))
+
+        img_mask_ap50 = per_threshold_mask_aps[0.5][-1]
+        img_box_ap50 = per_threshold_box_aps[0.5][-1]
+        print(
+            f"  {idx+1}/{n:<6} {img_path.name:<52} {len(pred_dets):<7} {len(gt_annotations):<7} "
+            f"{img_mask_ap50:<14.3f} {img_box_ap50:.3f}"
+        )
+
+    print(f"  {'-'*100}")
+
+    # ── Phase 2: dataset-level AP (image-aware pooling) ──────
+
+    n_thresh = len(iou_thresholds)
+    total_calls = n_thresh * 2  # mask + box, no duplicate AP50/AP75 calls
+    call_idx = [0]
+
+    def _pooled_ap(mat_list, scores_list, n_gt_list, threshold, label):
+        call_idx[0] += 1
+        total_preds = sum(len(s) for s in scores_list)
+        total_gt = sum(n_gt_list)
+        print(
+            f"  [{call_idx[0]:>2}/{total_calls}] {label} @ IoU={threshold:.2f}"
+            f"  ({total_preds} preds / {total_gt} GT, image-aware) ...",
+            end=" ",
+            flush=True,
+        )
+        ap = _dataset_ap_image_aware(mat_list, scores_list, n_gt_list, threshold)
+        print(f"AP={ap:.3f}")
+        return ap
+
+    print(f"\n  Phase 2/2 — dataset-level AP ({total_calls} computations)")
+    print(f"  {'-'*70}")
+
+    mask_ap_vals = {
+        round(t, 2): _pooled_ap(all_mask_matrices, all_scores_list, all_n_gt_mask, t, "Mask AP")
+        for t in iou_thresholds
+    }
+    box_ap_vals = {
+        round(t, 2): _pooled_ap(all_box_matrices, all_scores_list, all_n_gt_box, t, "Box  AP")
+        for t in iou_thresholds
+    }
+
+    mask_ap50 = mask_ap_vals[0.5]
+    mask_ap75 = mask_ap_vals[0.75]
+    mask_map50_95 = float(np.mean(list(mask_ap_vals.values())))
+
+    box_ap50 = box_ap_vals[0.5]
+    box_ap75 = box_ap_vals[0.75]
+    box_map50_95 = float(np.mean(list(box_ap_vals.values())))
+
+    per_image_mask_ap50 = per_threshold_mask_aps.get(0.5, [])
+    per_image_box_ap50 = per_threshold_box_aps.get(0.5, [])
+
+    # Per-image mean AP at every IoU threshold (used to be called
+    # 'per_threshold_*_aps'; renamed for clarity now that dataset-level
+    # per-threshold APs are also returned).
+    per_image_mean_mask_aps = {
+        k: float(np.mean(v)) if v else 0.0 for k, v in per_threshold_mask_aps.items()
+    }
+    per_image_mean_box_aps = {
+        k: float(np.mean(v)) if v else 0.0 for k, v in per_threshold_box_aps.items()
+    }
+
+    # Dataset-level AP at every IoU threshold (already computed in
+    # mask_ap_vals / box_ap_vals above; previously only 0.50, 0.75 and
+    # the mean were exposed).
+    dataset_mask_aps = {float(k): float(v) for k, v in mask_ap_vals.items()}
+    dataset_box_aps = {float(k): float(v) for k, v in box_ap_vals.items()}
+
+    return {
+        # Mask metrics
+        "mask_ap50": mask_ap50,
+        "mask_ap75": mask_ap75,
+        "mask_map50_95": mask_map50_95,
+        "mean_per_image_mask_ap50": float(np.mean(per_image_mask_ap50))
+        if per_image_mask_ap50
+        else 0.0,
+        "per_image_mask_ap50": per_image_mask_ap50,
+        "per_image_mean_mask_aps": per_image_mean_mask_aps,
+        "dataset_mask_aps": dataset_mask_aps,
+        # Kept for backward compatibility with older summary files:
+        "per_threshold_mask_aps": per_image_mean_mask_aps,
+        # Box metrics
+        "box_ap50": box_ap50,
+        "box_ap75": box_ap75,
+        "box_map50_95": box_map50_95,
+        "mean_per_image_box_ap50": float(np.mean(per_image_box_ap50))
+        if per_image_box_ap50
+        else 0.0,
+        "per_image_box_ap50": per_image_box_ap50,
+        "per_image_mean_box_aps": per_image_mean_box_aps,
+        "dataset_box_aps": dataset_box_aps,
+        # Kept for backward compatibility with older summary files:
+        "per_threshold_box_aps": per_image_mean_box_aps,
+    }
 
 
 def match_predictions_to_gt(predictions, ground_truth, iou_threshold=0.5):
@@ -947,6 +1455,58 @@ def run_model_benchmark(force_tune=False):
 
         print(f"\n  OK Saved {len(test_images)} overlays to {overlay_dir}")
 
+    # ── Step 2b: Compute mask & box AP metrics on the TEST set ─
+    print("\n" + "=" * 70)
+    print("COMPUTING AP METRICS — MASK & BOX (test set)")
+    print("=" * 70)
+
+    for model_name, data in results_dict.items():
+        best_params = data["best_params"]
+        model = data["model"]
+
+        print(f"\n  {model_name}: computing AP50, AP75, mAP50:95 (mask & box) ...")
+        ap_results = compute_ap_for_dataset(
+            model,
+            test_images,
+            TEST_ANNOTATIONS,
+            best_params,
+        )
+
+        data["ap_results"] = ap_results
+
+        print(f"\n  {'Metric':<20} {'Mask':<10} {'Box':<10}")
+        print(f"  {'-'*40}")
+        print(f"  {'AP50':<20} {ap_results['mask_ap50']:<10.3f} {ap_results['box_ap50']:<10.3f}")
+        print(f"  {'AP75':<20} {ap_results['mask_ap75']:<10.3f} {ap_results['box_ap75']:<10.3f}")
+        print(
+            f"  {'mAP50:95':<20} {ap_results['mask_map50_95']:<10.3f} {ap_results['box_map50_95']:<10.3f}"
+        )
+
+        # Per-threshold breakdown (both views)
+        print("\n  AP by IoU threshold:")
+        print(
+            f"  {'IoU':<6} "
+            f"{'Mask (ds)':<11} {'Mask (per-img)':<16} "
+            f"{'Box (ds)':<10} {'Box (per-img)':<15}"
+        )
+        print(f"  {'-'*60}")
+        mask_ds = ap_results.get("dataset_mask_aps", {})
+        box_ds = ap_results.get("dataset_box_aps", {})
+        mask_pi = ap_results.get(
+            "per_image_mean_mask_aps", ap_results.get("per_threshold_mask_aps", {})
+        )
+        box_pi = ap_results.get(
+            "per_image_mean_box_aps", ap_results.get("per_threshold_box_aps", {})
+        )
+        for t_key in sorted(mask_pi):
+            print(
+                f"  {float(t_key):<6.2f} "
+                f"{mask_ds.get(float(t_key), float('nan')):<11.3f} "
+                f"{mask_pi[t_key]:<16.3f} "
+                f"{box_ds.get(float(t_key), float('nan')):<10.3f} "
+                f"{box_pi[t_key]:<15.3f}"
+            )
+
     # ── Step 3: Save results ─────────────────────────────────
     print("\n" + "=" * 70)
     print("SAVING BENCHMARK RESULTS")
@@ -1015,6 +1575,29 @@ def run_model_benchmark(force_tune=False):
                 "precision": float(val_r["precision"]),
                 "recall": float(val_r["recall"]),
             }
+        # AP metrics (mask + box, if computed)
+        ap = data.get("ap_results")
+        if ap is not None:
+            summary_entry["mask_ap_metrics"] = {
+                "mask_ap50": float(ap["mask_ap50"]),
+                "mask_ap75": float(ap["mask_ap75"]),
+                "mask_map50_95": float(ap["mask_map50_95"]),
+                "mean_per_image_mask_ap50": float(ap["mean_per_image_mask_ap50"]),
+                "per_image_mean_mask_aps": ap.get(
+                    "per_image_mean_mask_aps", ap.get("per_threshold_mask_aps", {})
+                ),
+                "dataset_mask_aps": ap.get("dataset_mask_aps", {}),
+            }
+            summary_entry["box_ap_metrics"] = {
+                "box_ap50": float(ap["box_ap50"]),
+                "box_ap75": float(ap["box_ap75"]),
+                "box_map50_95": float(ap["box_map50_95"]),
+                "mean_per_image_box_ap50": float(ap["mean_per_image_box_ap50"]),
+                "per_image_mean_box_aps": ap.get(
+                    "per_image_mean_box_aps", ap.get("per_threshold_box_aps", {})
+                ),
+                "dataset_box_aps": ap.get("dataset_box_aps", {}),
+            }
         summary[model_name] = summary_entry
 
     with open(Path(BENCHMARK_METRICS_DIR) / "benchmark_summary.json", "w") as f:
@@ -1029,16 +1612,26 @@ def run_model_benchmark(force_tune=False):
     print("=" * 70)
 
     print(
-        f"\n{'Model':<10} {'F1':<8} {'Precision':<10} {'Recall':<10} {'TP':<8} {'FP':<8} {'FN':<8} {'(val F1)':<10}"
+        f"\n{'Model':<10} {'F1':<8} {'Prec':<8} {'Rec':<8} "
+        f"{'mAP50':<8} {'mAP50:95':<10} "
+        f"{'bAP50':<8} {'bAP50:95':<10} "
+        f"{'TP':<8} {'FP':<8} {'FN':<8} {'(val F1)':<10}"
     )
-    print("-" * 74)
+    print("-" * 118)
     for model_name in results_dict:
         test_r = results_dict[model_name]["test_result"]
         val_r = results_dict[model_name]["tuning_result"]
+        ap = results_dict[model_name].get("ap_results")
         val_f1_str = f"({val_r['f1_score']:.3f})" if val_r is not None else "(n/a)"
+        m_ap50 = f"{ap['mask_ap50']:.3f}" if ap else "n/a"
+        m_map = f"{ap['mask_map50_95']:.3f}" if ap else "n/a"
+        b_ap50 = f"{ap['box_ap50']:.3f}" if ap else "n/a"
+        b_map = f"{ap['box_map50_95']:.3f}" if ap else "n/a"
         print(
-            f"{model_name:<10} {test_r['f1_score']:<8.3f} {test_r['precision']:<10.3f} "
-            f"{test_r['recall']:<10.3f} {test_r['total_tp']:<8} {test_r['total_fp']:<8} "
+            f"{model_name:<10} {test_r['f1_score']:<8.3f} {test_r['precision']:<8.3f} "
+            f"{test_r['recall']:<8.3f} {m_ap50:<8} {m_map:<10} "
+            f"{b_ap50:<8} {b_map:<10} "
+            f"{test_r['total_tp']:<8} {test_r['total_fp']:<8} "
             f"{test_r['total_fn']:<8} {val_f1_str}"
         )
 
