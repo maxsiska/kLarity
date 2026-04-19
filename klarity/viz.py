@@ -680,6 +680,8 @@ def plot_metric_grid_from_agg(
     viscosity_label: str = "µ (Pa·s)",
     viscosity_decimals: int = 3,
     viscosity_label_pad: float = 10,  # Distance between xanthan title and viscosity label
+    # PV map: replace rpm tick labels with P/V values per xanthan level
+    pv_map: Optional[dict] = None,  # {xanthan_level: {rpm: pv_value}}
     # existing
     dpi: int = 300,
     outpath: Optional[Union[str, Path]] = None,
@@ -803,7 +805,7 @@ def plot_metric_grid_from_agg(
     fig_height = cell_height * nrows + 1.3
 
     fig, axes = matplotlib.pyplot.subplots(
-        nrows=nrows, ncols=ncols, figsize=(A4_TEXT_WIDTH_IN, fig_height), sharex=True, sharey=True
+        nrows=nrows, ncols=ncols, figsize=(A4_TEXT_WIDTH_IN, fig_height), sharex=False, sharey=True
     )
     if nrows == 1 and ncols == 1:
         axes = numpy.array([[axes]])
@@ -926,14 +928,16 @@ def plot_metric_grid_from_agg(
                 ax.tick_params(axis="y", labelleft=False, labelsize=9)
 
             if i == nrows - 1:
-                ax.set_xticklabels(
-                    [str(int(v)) if float(v).is_integer() else str(v) for v in rpm_levels],
-                    ha="center",
-                    fontsize=9,
-                )
-                ax.set_xlabel(
-                    xlab,
-                )
+                if pv_map is not None and x in pv_map:
+                    xtick_labels = [
+                        str(pv_map[x][v]) if v in pv_map[x] else str(v) for v in rpm_levels
+                    ]
+                else:
+                    xtick_labels = [
+                        str(int(v)) if float(v).is_integer() else str(v) for v in rpm_levels
+                    ]
+                ax.set_xticklabels(xtick_labels, ha="center", fontsize=9)
+                ax.set_xlabel(xlab)
                 ax.tick_params(axis="x", labelsize=9)
             else:
                 ax.set_xticklabels([])
