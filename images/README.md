@@ -4,7 +4,7 @@ Raw endoscope images are not included in this repository due to their size.
 
 ## Download
 
-> **Zenodo:** [DOI placeholder — link will be added upon publication]
+> [**Zenodo:**](10.5281/zenodo.19582133)
 
 ## Expected layout
 
@@ -12,8 +12,8 @@ Images are organised by replicate recording. The `config.py` `IMAGE_DIR` setting
 
 ```
 images/
-├── <recording_id>/
-│   ├── <frame>.jpg
+├── <Position_id>/
+│   ├── <Setting_id>/
 │   └── ...
 └── ...
 ```
