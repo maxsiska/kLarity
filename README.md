@@ -100,4 +100,4 @@ This project is licensed under the GNU Affero General Public License v3.0 — se
 ## Citation
 
 To cite this repository or reuse its content in your own work, please refer to the latest release:
-➡ [Zenodo Link](https://doi.org/10.5281/19709975)
+➡ [Zenodo Link](https://doi.org/10.5281/zenodo.19709975)
