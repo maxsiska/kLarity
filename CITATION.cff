@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+title: "kLarity"
+message: "If you use this software, please cite it."
+authors:
+  - family-names: Siska
+    given-names: Maximilian
+    orcid: "https://orcid.org/0000-0002-1731-559X"
+  - family-names: Willer
+    given-names: Emilie Overgaard
+    orcid: "https://orcid.org/0009-0004-1254-2226"
+version: 0.1.0
+date-released: "2026-04-23"
+license: GNU Affero General Public License v3.0
