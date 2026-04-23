@@ -1,5 +1,7 @@
 # kLarity
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19709975.svg)](https://doi.org/10.5281/zenodo.19709975)
+
 **kLarity** is an open-source pipeline for automated detection, segmentation, and characterisation of gas bubbles in endoscope images from pilot-scale stirred bioreactors. It combines a fine-tuned YOLOv11 instance segmentation model with ellipse fitting to estimate bubble size distributions across multiple camera placements and operating conditions.
 
 This repository accompanies the paper:
@@ -98,4 +100,4 @@ This project is licensed under the GNU Affero General Public License v3.0 — se
 ## Citation
 
 To cite this repository or reuse its content in your own work, please refer to the latest release:
-➡ [Zenodo Link](https://doi.org/10.5281/xxxxxxxxx)
+➡ [Zenodo Link](https://doi.org/10.5281/19709975)
