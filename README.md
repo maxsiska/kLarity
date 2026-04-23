@@ -15,7 +15,7 @@ This repository accompanies the paper:
 ```bash
 git clone https://github.com/<org>/klarity.git
 cd klarity
-pip install -e ".[dev]"
+pip install -e .
 ```
 
 > **GPU:** `ultralytics` installs a CPU-only PyTorch build by default. For GPU inference, install the appropriate CUDA-enabled torch version *before* running `pip install -e .` — see the [PyTorch installation guide](https://pytorch.org/get-started/locally/).
