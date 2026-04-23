@@ -11,4 +11,3 @@ Place the downloaded file at:
 ```
 models/klarity-model.pt
 ```
-
