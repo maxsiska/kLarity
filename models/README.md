@@ -4,7 +4,7 @@ Model weights are not included in this repository.
 
 ## Download
 
-> [**Zenodo:**] (10.5281/zenodo.19582133)
+> [**Zenodo**](https://doi.org/10.5281/zenodo.19582132)
 
 Place the downloaded file at:
 

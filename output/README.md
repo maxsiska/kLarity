@@ -5,4 +5,4 @@ This directory can be populated by processing all raw images with `scripts/proce
 It contains one parquet file per position recording with per-bubble detection results.
 
 The output files can be downloaded:
-> [Zenodo](10.5281/zenodo.19582133)
+> [**Zenodo**](https://doi.org/10.5281/zenodo.19582132)
