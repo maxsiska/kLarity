@@ -4,7 +4,7 @@ Raw endoscope images are not included in this repository due to their size.
 
 ## Download
 
-> [**Zenodo:**](10.5281/zenodo.19582133)
+> [**Zenodo**](https://doi.org/10.5281/zenodo.19582132)
 
 ## Expected layout
 
