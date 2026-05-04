@@ -930,7 +930,7 @@ def plot_metric_grid_from_agg(
             if i == nrows - 1:
                 if pv_map is not None and x in pv_map:
                     xtick_labels = [
-                        str(pv_map[x][v]) if v in pv_map[x] else str(v) for v in rpm_levels
+                        f"{pv_map[x][v]:.3f}" if v in pv_map[x] else str(v) for v in rpm_levels
                     ]
                 else:
                     xtick_labels = [
