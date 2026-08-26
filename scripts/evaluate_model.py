@@ -653,7 +653,7 @@ def compute_ap_for_dataset(
     }
 
     # Dataset-level AP at every IoU threshold (already computed in
-    # mask_ap_vals / box_ap_vals above; previously only 0.50, 0.75 and
+    # mask_ap_vals / box_ap_vals above; the displayed subset uses 0.50, 0.75 and
     # the mean were exposed).
     dataset_mask_aps = {float(k): float(v) for k, v in mask_ap_vals.items()}
     dataset_box_aps = {float(k): float(v) for k, v in box_ap_vals.items()}
@@ -663,9 +663,9 @@ def compute_ap_for_dataset(
         "mask_ap50": mask_ap50,
         "mask_ap75": mask_ap75,
         "mask_map50_95": mask_map50_95,
-        "mean_per_image_mask_ap50": float(np.mean(per_image_mask_ap50))
-        if per_image_mask_ap50
-        else 0.0,
+        "mean_per_image_mask_ap50": (
+            float(np.mean(per_image_mask_ap50)) if per_image_mask_ap50 else 0.0
+        ),
         "per_image_mask_ap50": per_image_mask_ap50,
         "per_image_mean_mask_aps": per_image_mean_mask_aps,
         "dataset_mask_aps": dataset_mask_aps,
@@ -675,9 +675,9 @@ def compute_ap_for_dataset(
         "box_ap50": box_ap50,
         "box_ap75": box_ap75,
         "box_map50_95": box_map50_95,
-        "mean_per_image_box_ap50": float(np.mean(per_image_box_ap50))
-        if per_image_box_ap50
-        else 0.0,
+        "mean_per_image_box_ap50": (
+            float(np.mean(per_image_box_ap50)) if per_image_box_ap50 else 0.0
+        ),
         "per_image_box_ap50": per_image_box_ap50,
         "per_image_mean_box_aps": per_image_mean_box_aps,
         "dataset_box_aps": dataset_box_aps,
@@ -977,7 +977,7 @@ def quick_tune_model(model, tuning_images, model_name):
     tuning_history = []
 
     # ── Verification step ────────────────────────────────────
-    print("\n>> Verifying max_det fix...")
+    print("\n>> Verifying detection capacity...")
     test_sample = tuning_images[:5]
     total_detections = 0
     total_gt = 0
@@ -1031,7 +1031,7 @@ def quick_tune_model(model, tuning_images, model_name):
     print("\n   Key insights:")
     if avg_detections > 290 and avg_gt > 400:
         print("   OK Detecting >290 bubbles/image with GT showing >400 bubbles/image")
-        print("   OK max_det fix appears to be working!")
+        print("   OK Detection capacity is above 290 bubbles per image")
     elif avg_detections < 305 and avg_gt > 350:
         print("   WARNING WARNING: Detecting ~300 bubbles but GT shows significantly more!")
         print("   WARNING This strongly suggests max_det=300 limit is still active")
@@ -1042,7 +1042,7 @@ def quick_tune_model(model, tuning_images, model_name):
         print(f"   WARNING Only detecting {overall_percent:.1f}% of GT bubbles")
         print("   This could be due to: conf threshold too high, max_det limit, or model issues")
 
-    print(f"\n   Review overlays in: {verification_overlay_dir}")
+    print(f"\n   Inspect overlays in: {verification_overlay_dir}")
 
     # ── Stage 1: Tune CONF ───────────────────────────────────
     print("\nStage 1: Tuning CONF...")

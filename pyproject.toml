@@ -1,6 +1,6 @@
 [project]
 name = "klarity"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python package accompanying the manuscript \"From Global Averages to Local Reality: Machine Learning Driven Quantification of Bubble Dynamics in a Pilot Scale Stirred Bioreactor\""
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,6 +24,7 @@ dependencies = [
     "scipy>=1.10",
     "openpyxl>=3.1",
     "ultralytics>=8.3",  # also installs torch and torchvision (CPU build by default)
+    "pyarrow>=15.0",  # Parquet engine: parsing.save_to_parquet requests it explicitly
 ]
 
 [project.optional-dependencies]
@@ -33,6 +34,10 @@ dev = [
     "ruff",
     "mypy",
     "pre-commit",
+]
+notebook = [
+    "jupyterlab",
+    "ipykernel",
 ]
 
 [build-system]
@@ -52,9 +57,20 @@ profile = "black"
 [tool.ruff]
 line-length = 140
 
+[tool.ruff.lint.per-file-ignores]
+# The parallel cluster driver must set OMP/BLAS/MKL thread caps in os.environ BEFORE
+# numpy/torch/cv2 are imported (otherwise each worker spawns `cores` math threads and
+# thrashes the CPU), so its module-level imports intentionally follow that setup block.
+"scripts/process_images_parallel.py" = ["E402"]
+
 [tool.mypy]
 ignore_missing_imports = true
 disable_error_code = ["call-arg", "assignment", "return-value", "import", "attr-defined"]
 exclude = [
     'test_.*?\.py$',
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]

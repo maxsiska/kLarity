@@ -8,10 +8,14 @@ Run from the project root with:
 All paths and parameters are set in config.py at the project root.
 """
 
+import hashlib
+import json
 import os
 import re
+import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 
 import cv2
 import numpy as np
@@ -25,11 +29,86 @@ IMAGE_ROOT_DIR = config.IMAGE_DIR
 OUTPUT_DIR = config.OUTPUT_DIR
 MODEL_PATH = config.MODEL_PATH
 OVERLAYS_PATH = config.OVERLAYS_DIR
-CONF = config.CONF
-IOU = config.IOU
-MASK_THR = config.MASK_THR
+PROCESSING = config.PROCESSING_CONFIG
+CONF = PROCESSING.confidence
+IOU = PROCESSING.iou
+MASK_THR = PROCESSING.mask_threshold
+CONF_LARGE = PROCESSING.large_mask_confidence
+LARGE_FRAC = PROCESSING.large_mask_fraction
+BLANK_FRAME_MEAN_THRESH = PROCESSING.blank_mean_threshold
 OVERLAY_MODE = config.OVERLAY_MODE
 DEVICE = config.DEVICE
+
+
+def write_processing_manifest(output_dir):
+    """Write a reproducibility manifest next to the Parquet outputs.
+
+    Records everything needed to reproduce this processing run: code version
+    (git commit + dirty flag), model file hash, inference parameters, and key
+    package versions. Each run start appends an entry so partially processed
+    directories stay traceable.
+    """
+    import ultralytics
+
+    def _git(*args):
+        try:
+            return subprocess.run(
+                ["git", *args],
+                capture_output=True,
+                text=True,
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                timeout=10,
+            ).stdout.strip()
+        except Exception:
+            return "unavailable"
+
+    model_hash = "unavailable"
+    try:
+        with open(MODEL_PATH, "rb") as f:
+            model_hash = hashlib.sha256(f.read()).hexdigest()
+    except Exception:
+        pass
+
+    entry = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "git_commit": _git("rev-parse", "HEAD"),
+        "git_branch": _git("rev-parse", "--abbrev-ref", "HEAD"),
+        "git_dirty": bool(_git("status", "--porcelain")),
+        "model_path": str(MODEL_PATH),
+        "model_sha256": model_hash,
+        "image_root": str(IMAGE_ROOT_DIR),
+        "conf": CONF,
+        "iou": IOU,
+        "mask_binarize_thr": MASK_THR,
+        "conf_large": CONF_LARGE,
+        "large_frac": LARGE_FRAC,
+        "size_gate_active": CONF_LARGE > CONF,
+        "overlay_mode": OVERLAY_MODE,
+        "device": str(DEVICE),
+        "versions": {
+            "python": sys.version.split()[0],
+            "torch": torch.__version__,
+            "ultralytics": ultralytics.__version__,
+            "opencv": cv2.__version__,
+            "numpy": np.__version__,
+        },
+    }
+    os.makedirs(output_dir, exist_ok=True)
+    manifest_path = os.path.join(output_dir, "processing_manifest.json")
+    entries = []
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path) as f:
+                entries = json.load(f)
+        except Exception:
+            entries = []
+    entries.append(entry)
+    with open(manifest_path, "w") as f:
+        json.dump(entries, f, indent=2)
+    print(
+        f"Manifest -> {manifest_path} (git {entry['git_commit'][:9]}"
+        f"{' DIRTY' if entry['git_dirty'] else ''})"
+    )
 
 
 def should_generate_overlay(image_index, total_images, mode):
@@ -84,6 +163,7 @@ def process_replicate_single(
     ps = default_pixel_size_mm
     zero_xanthan = parsing._is_zero_xanthan(setting)
     valid_image_count = 0
+    blank_skipped = 0
 
     # Prepare overlay directory
     base_overlay_dir = None
@@ -105,7 +185,16 @@ def process_replicate_single(
 
         # Load and validate image
         im0 = cv2.imread(img_path)
-        if im0 is None or np.all(im0 == 0):
+        if im0 is None:
+            # Unreadable frame: skip without counting it as a valid image so the
+            # 50-frame burst indexing stays aligned.
+            pbar.update(1)
+            continue
+        if parsing.is_blank_frame(im0, BLANK_FRAME_MEAN_THRESH):
+            # Blank/black acquisition frame (illumination off, ~one per burst): no
+            # analyzable content, and the model would emit a spurious full-frame mask.
+            # Skip without counting it as a valid image so burst indexing stays aligned.
+            blank_skipped += 1
             pbar.update(1)
             continue
 
@@ -124,8 +213,11 @@ def process_replicate_single(
                 save_masks_overlay=False,
                 save_fit_overlay=True if overlay_dir else False,
                 pixel_size_mm=ps,
-                geom_mode="hybrid",
+                geom_mode=PROCESSING.geometry_mode,
+                sphere_if_aspect_tol=PROCESSING.sphere_aspect_tolerance,
                 show_axes=False,
+                conf_large=CONF_LARGE,
+                large_frac=LARGE_FRAC,
             )
 
             # Add metadata
@@ -159,10 +251,14 @@ def process_replicate_single(
                 for gpu_id in device.split(","):
                     with torch.cuda.device(int(gpu_id)):
                         torch.cuda.empty_cache()
-            elif device != "cpu":
+            elif device not in ("cpu", "mps"):
                 torch.cuda.empty_cache()
 
     pbar.close()
+    if blank_skipped:
+        print(
+            f"  Skipped {blank_skipped} blank/black frame(s) in {placement}/{setting}/{replicate}"
+        )
     return bubble_data
 
 
@@ -175,16 +271,21 @@ def process_all_settings():
         p for p in os.listdir(IMAGE_ROOT_DIR) if os.path.isdir(os.path.join(IMAGE_ROOT_DIR, p))
     ]
 
-    for placement in placements:
-        placement_path = os.path.join(IMAGE_ROOT_DIR, placement)
-        for setting in os.listdir(placement_path):
-            setting_path = os.path.join(placement_path, setting)
+    # Paths use the on-disk names; the stored metadata and output filenames use the
+    # normalized form (parsing.normalize_metadata_value).
+    for placement_dir in placements:
+        placement_path = os.path.join(IMAGE_ROOT_DIR, placement_dir)
+        placement = parsing.normalize_metadata_value(placement_dir)
+        for setting_dir in os.listdir(placement_path):
+            setting_path = os.path.join(placement_path, setting_dir)
             if not os.path.isdir(setting_path):
                 continue
-            for replicate in os.listdir(setting_path):
-                replicate_path = os.path.join(setting_path, replicate)
+            setting = parsing.normalize_metadata_value(setting_dir)
+            for replicate_dir in os.listdir(setting_path):
+                replicate_path = os.path.join(setting_path, replicate_dir)
                 if not os.path.isdir(replicate_path):
                     continue
+                replicate = parsing.normalize_metadata_value(replicate_dir)
                 if not parsing.check_if_processed(placement, setting, replicate, OUTPUT_DIR):
                     replicates_to_process.append(
                         {
@@ -207,11 +308,10 @@ def process_all_settings():
         print("OK All replicates already processed!")
         return
 
-    # Load model
-    print("Loading model...")
-    model = parsing.load_yolo_model(MODEL_PATH)
+    # Record the run configuration before any processing starts
+    write_processing_manifest(OUTPUT_DIR)
 
-    # Detect and set device
+    # Resolve the device before constructing the model.
     if DEVICE == "auto":
         if torch.cuda.is_available():
             device = "0"
@@ -225,14 +325,17 @@ def process_all_settings():
     else:
         device = DEVICE
 
-    # Load model on appropriate device
+    print("Loading model...")
+    model_device = device if device in ("cpu", "mps") else f"cuda:{device.split(',')[0]}"
+    model = parsing.load_yolo_model(MODEL_PATH, device=model_device)
+
     if device == "cpu":
         print("OK Using CPU")
+    elif device == "mps":
+        print("OK Using Apple MPS")
     else:
         # Get first GPU from device string
         first_gpu = device.split(",")[0]
-        model.to(f"cuda:{first_gpu}")
-
         if "," in device:
             # Multi-GPU
             gpu_list = [int(g) for g in device.split(",")]
