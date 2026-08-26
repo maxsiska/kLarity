@@ -1,6 +1,10 @@
 # ── Data and model weights (download separately — see data/ and models/README.md) ──
 data/*
 !data/README.md
+!data/kla_data_000_xanthan.xlsx
+!data/xanthan_rheology.xlsx
+!data/public/
+!data/public/**
 models/*
 !models/README.md
 images/*
@@ -62,7 +66,7 @@ Thumbs.db
 profile_default/
 ipython_config.py
 
-# Remove previous ipynb_checkpoints
+# Jupyter checkpoints
 #   git rm -r .ipynb_checkpoints/
 
 ### Linux ###
@@ -157,3 +161,13 @@ $RECYCLE.BIN/
 
 # Windows shortcuts
 *.lnk
+
+# kLarity cluster deploy bundle (build artifact — regenerated, never committed)
+deploy/
+
+# Local validation scratch
+images_validation/
+output_validation/
+output_validation_*/
+overlays_validation/
+data_validation/
