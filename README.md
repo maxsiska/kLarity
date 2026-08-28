@@ -7,9 +7,8 @@ pilot-scale stirred bioreactors. It combines a YOLO instance-segmentation model 
 two-half-ellipse fit to estimate bubble size, gas volume, and interfacial area across
 camera placements and operating conditions.
 
-The repository accompanies *From Global Averages to Local Reality: Machine Learning Driven
-Quantification of Bubble Dynamics in a Pilot Scale Stirred Bioreactor* by Emilie Overgaard
-Willer, Maximilian Siska, Juliet J. Victoria, Eric von Lieres, and John M. Woodley.
+The repository accompanies *Machine Learning Driven Quantification of Local Bubble Dynamics across a Pilot Scale Stirred Bioreactor* by Emilie Overgaard
+Willer, Maximilian Siska, Benjamin Petersen, Juliet J. Victoria, Eric von Lieres, and John M. Woodley.
 
 ## Installation
 
