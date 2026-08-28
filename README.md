@@ -6,8 +6,8 @@
 
 This repository accompanies the paper:
 
-> Emilie Overgaard Willer, Maximilian Siska, Juliet J. Victoria, Eric von Lieres, and John M. Woodley.
-> **From Global Averages to Local Reality: Machine Learning Driven Quantification of Bubble Dynamics in a Pilot Scale Stirred Bioreactor.**
+> Emilie Overgaard Willer, Maximilian Siska, Benjamin Petersen, Juliet J. Victoria, Eric von Lieres, and John M. Woodley.
+> **Machine Learning Driven Quantification of Local Bubble Dynamics across a Pilot Scale Stirred Bioreactor.**
 > DOI: [placeholder — will be updated upon publication]
 
 ---
