@@ -36,6 +36,10 @@ Run commands from the repository root.
    One Parquet file is written per replicate under `output/`. Set
    `KLARITY_OUTPUT_DIR=/path/to/output` to use another location.
 
+   `notebooks/process_images.ipynb` is an optional interactive wrapper around the same
+   processing functions. For normal and reproducible runs, use the script above; do not
+   run both entry points against the same unprocessed dataset.
+
 2. Build the analysis tables:
 
    ```bash
@@ -44,7 +48,10 @@ Run commands from the repository root.
    ```
 
    The frame inventory ensures that every usable input image contributes correctly to
-   frame-based averages. It reads the images without running model inference.
+   frame-based averages. It reads the images without running model inference. The build
+   writes the large bubble-level table as Parquet and the smaller frame table as a pickle.
+   Both are written atomically, so an interrupted build cannot replace a valid table with
+   a truncated file.
 
 3. Build the compact condition and temporal tables:
 

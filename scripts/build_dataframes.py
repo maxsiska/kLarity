@@ -2,10 +2,10 @@
 """
 Build bubble-level and frame-level DataFrames from processed Parquet files.
 
-Run this script after process_images.py to produce the two pkl files that all
+Run this script after process_images.py to produce the two analysis tables that all
 plotting notebooks depend on.
 
-The bubble-level pkl is trimmed to the analysis-relevant columns (_BUBBLE_KEEP_COLUMNS)
+The bubble-level Parquet is trimmed to the analysis-relevant columns (_BUBBLE_KEEP_COLUMNS)
 so the full ~99M-row dataset fits in workstation RAM; the complete 50-column record stays
 in the Parquet files. Parquet is streamed and concatenated with unified categorical dtypes
 to keep memory bounded.
@@ -28,7 +28,7 @@ import pyarrow.parquet as pq
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import config
-from klarity import geometry, metrics, parsing
+from klarity import geometry, io, metrics, parsing
 
 # Rename Parquet columns → names expected by metrics.py
 _COLUMN_RENAMES = {
@@ -37,10 +37,10 @@ _COLUMN_RENAMES = {
     "surface_area_mm2_chosen": "bubble_surface_area_mm2",
 }
 
-# Columns kept in the bubble-level pkl, of the ~50 written per Parquet file. The full
-# record stays in the Parquet files (source of truth); the monolithic pkl is trimmed to
+# Columns kept in the bubble-level table, of the ~50 written per Parquet file. The full
+# record stays in the source Parquet files; the analysis table is trimmed to
 # what the analysis actually reads so all ~99M rows fit in RAM on a workstation. A full
-# 50-column pkl of this dataset is ~40 GB in memory and does not fit in 17 GB.
+# 50-column table of this dataset is ~40 GB in memory and does not fit in 17 GB.
 # Raw Parquet names here; the three *_chosen columns are renamed via _COLUMN_RENAMES.
 _BUBBLE_KEEP_COLUMNS = [
     # MultiIndex levels
@@ -184,10 +184,10 @@ def _newest_parquet_mtime(parquet_dir: Path) -> float:
 
 
 def is_stale(parquet_dir: Path) -> bool:
-    """Return True if either pkl is missing or older than the newest Parquet."""
+    """Return True if either analysis artifact is missing or older than the source."""
     newest = _newest_parquet_mtime(parquet_dir)
-    for pkl in (config.BUBBLE_LEVEL_PKL, config.FRAME_LEVEL_PKL):
-        if not pkl.exists() or pkl.stat().st_mtime < newest:
+    for artifact in (config.BUBBLE_LEVEL_PARQUET, config.FRAME_LEVEL_PKL):
+        if not artifact.exists() or artifact.stat().st_mtime < newest:
             return True
     return False
 
@@ -272,10 +272,12 @@ def build(
     bubble_df = bubble_df.set_index(list(parsing.index_levels))
 
     # ── 4. Save bubble-level DataFrame ────────────────────────────────────────
-    config.BUBBLE_LEVEL_PKL.parent.mkdir(parents=True, exist_ok=True)
-    bubble_df.to_pickle(config.BUBBLE_LEVEL_PKL)
-    size_mb = config.BUBBLE_LEVEL_PKL.stat().st_size / 1e6
-    print(f"  Saved bubble_level_df  →  {config.BUBBLE_LEVEL_PKL}  ({size_mb:.1f} MB)\n")
+    # The complete artifact exceeds 4 GiB. Parquet avoids the oversized pickle write that
+    # fails on some Windows/network filesystems, and the atomic helper prevents an
+    # interrupted build from leaving a truncated destination behind.
+    io.write_dataframe_atomic(bubble_df, config.BUBBLE_LEVEL_PARQUET)
+    size_mb = config.BUBBLE_LEVEL_PARQUET.stat().st_size / 1e6
+    print(f"  Saved bubble_level_df  →  {config.BUBBLE_LEVEL_PARQUET}  " f"({size_mb:.1f} MB)\n")
 
     # ── 5. Compute frame-level metrics ────────────────────────────────────────
     print("Computing frame-level metrics...")
@@ -295,7 +297,7 @@ def build(
     print(f"  {len(frame_df):,} frames computed")
 
     # ── 6. Save frame-level DataFrame ─────────────────────────────────────────
-    frame_df.to_pickle(config.FRAME_LEVEL_PKL)
+    io.write_dataframe_atomic(frame_df, config.FRAME_LEVEL_PKL)
     size_mb = config.FRAME_LEVEL_PKL.stat().st_size / 1e6
     print(f"  Saved frame_level_df   →  {config.FRAME_LEVEL_PKL}  ({size_mb:.1f} MB)\n")
 

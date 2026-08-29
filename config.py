@@ -26,7 +26,11 @@ IMAGE_DIR = ROOT / "images"
 OUTPUT_DIR = Path(os.environ.get("KLARITY_OUTPUT_DIR", ROOT / "output"))
 OUTPUT_METADATA_DIR = OUTPUT_DIR / "metadata"
 
-# Pre-computed aggregates used by notebooks
+# Pre-computed aggregates used by notebooks. The complete bubble table is larger than
+# 4 GiB, which makes a monolithic pickle unreliable on some Windows/network-drive
+# combinations. New builds therefore use Parquet; BUBBLE_LEVEL_PKL remains as a legacy
+# read fallback for previously generated datasets.
+BUBBLE_LEVEL_PARQUET = ROOT / "data" / "bubble_level_df.parquet"
 BUBBLE_LEVEL_PKL = ROOT / "data" / "bubble_level_df.pkl"
 FRAME_LEVEL_PKL = ROOT / "data" / "frame_level_df.pkl"
 FRAME_CENSUS_PARQUET = OUTPUT_METADATA_DIR / "frame_census.parquet"
