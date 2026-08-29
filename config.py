@@ -37,8 +37,7 @@ FRAME_CENSUS_PARQUET = OUTPUT_METADATA_DIR / "frame_census.parquet"
 FRAME_CENSUS_SUMMARY = OUTPUT_METADATA_DIR / "frame_census_summary.csv"
 FRAME_FILTER_SUMMARY = OUTPUT_METADATA_DIR / "frame_filter_summary.parquet"
 
-# Reference spreadsheets
-KLA_XLSX = ROOT / "data" / "kla_data_000_xanthan.xlsx"
+# Rheology measurements used by notebooks/xanthan_rheology.ipynb
 RHEOLOGY_XLSX = ROOT / "data" / "xanthan_rheology.xlsx"
 
 

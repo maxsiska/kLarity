@@ -7,6 +7,9 @@ retain a fallback for legacy `bubble_level_df.pkl` files. The smaller frame tabl
 with the processed dataset linked from [`../output/README.md`](../output/README.md). Frame
 and filter censuses live under `output/metadata/` beside the processed Parquet collection.
 
-`public/` contains compact, frozen inputs required by the notebooks. The two small
-spreadsheets in this directory contain the kLa and rheology reference measurements used by
-the corresponding analyses.
+`public/` contains compact, frozen inputs required by the plotting notebooks.
+
+`notebooks/xanthan_rheology.ipynb` additionally requires `xanthan_rheology.xlsx`. Download
+that reference workbook with the processed dataset from
+[Zenodo](https://doi.org/10.5281/zenodo.19582132) and place it at
+`data/xanthan_rheology.xlsx`. The workbook is deliberately not tracked by Git.

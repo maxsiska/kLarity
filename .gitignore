@@ -1,8 +1,6 @@
 # ── Data and model weights (download separately — see data/ and models/README.md) ──
 data/*
 !data/README.md
-!data/kla_data_000_xanthan.xlsx
-!data/xanthan_rheology.xlsx
 !data/public/
 !data/public/**
 models/*
