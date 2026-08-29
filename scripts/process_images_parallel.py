@@ -56,6 +56,10 @@ import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
+from pathlib import Path
+
+# Direct execution sets sys.path[0] to scripts/, not the repository root.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cv2
 from tqdm import tqdm
