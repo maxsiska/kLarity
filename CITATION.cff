@@ -1,6 +1,8 @@
 cff-version: 1.2.0
+message: "If you use kLarity, please cite the accompanying article and this software."
 title: "kLarity"
-message: "If you use this software, please cite it."
+type: software
+version: 0.2.0
 authors:
   - family-names: Siska
     given-names: Maximilian
@@ -8,6 +10,9 @@ authors:
   - family-names: Willer
     given-names: Emilie Overgaard
     orcid: "https://orcid.org/0009-0004-1254-2226"
-version: 0.1.0
-date-released: "2026-04-23"
-license: GNU Affero General Public License v3.0
+license: AGPL-3.0-only
+repository-code: "https://github.com/maxsiska/kLarity"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.19709975"
+    description: "Archived kLarity software release"

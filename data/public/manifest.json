@@ -1,0 +1,19 @@
+{
+  "files": [
+    {
+      "file": "headline_numbers_by_condition.csv",
+      "description": "Condition-level estimates and prolate-oblate intervals",
+      "sha256": "72d839f6fd8724640feb2dd69b5b7eca79240c7882e20b81fd318366c2a18061"
+    },
+    {
+      "file": "temporal_independence_full_grid.csv",
+      "description": "Effective sample sizes for bubble count and diameter",
+      "sha256": "dc328481b7117b0b19f3aa7a20762c05a321ff8fc004fbde15a83814c8aed561"
+    },
+    {
+      "file": "temporal_independence_holdup.csv",
+      "description": "Effective sample sizes for gas holdup and interfacial area",
+      "sha256": "4bc740d022240e4ec99ce2a8b7d26b8fe5a0acdf98f546903128be62d4adf026"
+    }
+  ]
+}
