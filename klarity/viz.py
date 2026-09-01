@@ -1,14 +1,17 @@
+from __future__ import annotations
+
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Optional, Union
 
 import matplotlib
+import matplotlib.lines
 import matplotlib.pyplot
 import matplotlib.ticker
 import numpy
 import pandas
 
-from klarity import metrics
+from klarity import metrics as metric_utils
 from klarity.parsing import parse_setting
 
 matplotlib.rcParams["font.serif"] = ["Times New Roman"]
@@ -47,7 +50,7 @@ class Colors:
 
 
 custom_cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
-    "review-blend", ["#FFEBFE", "#52004E"]
+    "metric-blend", ["#FFEBFE", "#52004E"]
 )
 
 
@@ -69,74 +72,118 @@ color_cycle = [
 
 placement_level_x = -0.45
 
+# Tolerance when checking that a supplied systematic band brackets the plotted mean,
+# as a fraction of the largest mean on the series. Relative rather than absolute so the
+# same check works for gas holdup (order 1e-3) and interfacial area (order 1e2).
+# See plot_settings_comparison(band_lookup=...).
+_BAND_REL_TOL = 1e-6
+
+
+def nice_tick_step(span: float, max_ticks: int = 5) -> float:
+    """
+    Smallest "nice" major-tick spacing that yields at most `max_ticks` ticks over `span`.
+
+    Candidate steps are 1, 2, 2.5 or 5 times a power of ten, so tick labels stay short.
+    Ticks sit on multiples of the step and the axis limits are arbitrary, so the worst
+    case is ``floor(span / step) + 1`` ticks inside the view; the smallest candidate
+    satisfying that bound is returned.
+
+    span: axis range in data units (same units as the axis, e.g. mm)
+    max_ticks: upper bound on the number of major ticks (>= 2)
+    """
+    if not numpy.isfinite(span) or span <= 0:
+        raise ValueError(f"span must be finite and positive, got {span!r}")
+    if max_ticks < 2:
+        raise ValueError(f"max_ticks must be >= 2, got {max_ticks!r}")
+
+    # Any admissible step satisfies step > span / max_ticks, so starting one decade
+    # below that scale cannot skip the answer.
+    decade = 10.0 ** numpy.floor(numpy.log10(span / max_ticks))
+    for scale in (decade / 10.0, decade, decade * 10.0):
+        for multiple in (1.0, 2.0, 2.5, 5.0):
+            step = float(multiple * scale)
+            # +1e-9 keeps the count conservative when span / step is an integer in
+            # exact arithmetic but lands just below it in floating point.
+            if numpy.floor(span / step + 1e-9) + 1 <= max_ticks:
+                return step
+    return float(10.0 * decade)
+
+
 METRIC_SPECS = {
     "mean_diameter_mm": dict(
-        title="Mean bubble diameter",
-        cbar="Mean bubble diameter [mm]",
+        title="Pooled mean bubble diameter",
+        cbar="Pooled mean bubble diameter [mm]",
+        estimand=metric_utils.condition_metric_population("mean_diameter_mm"),
         robust=False,
         vmin=None,
         vmax=None,
         annotation_decimals=2,
     ),
-    "epsilon_obs": dict(
-        title="Local gas holdup (observed volume)",
-        cbar=r"$\varepsilon$ = V$_\mathrm{gas}$ / V$_\mathrm{obs}$",
+    # Gas holdup (volume) and interfacial-area density (surface) depend on the unobserved
+    # prolate/oblate depth axis, so they are reported as the band MIDPOINT plus a companion
+    # band-width panel (± relative half-width, %). See metrics.spheroid_band_arrays.
+    "epsilon_obs_mid": dict(
+        title="Local gas holdup (prolate–oblate midpoint)",
+        cbar=r"Local gas holdup $\varepsilon$ [-]",
+        estimand=metric_utils.condition_metric_population("epsilon_obs_mid"),
         robust=True,
         vmin=None,
         vmax=None,
         annotation_decimals=3,
     ),
-    "a_obs_m2_m3": dict(
-        title="Local specific interfacial area (observed volume)",
-        cbar=r"Interfacial area [m$^{2}$ m$^{-3}$]",
+    "epsilon_obs_band_pct": dict(
+        title="Gas holdup: prolate–oblate band width",
+        cbar=r"band half-width [$\pm$%]",
+        estimand=metric_utils.condition_metric_population("epsilon_obs_band_pct"),
         robust=True,
         vmin=None,
         vmax=None,
         annotation_decimals=1,
     ),
-    "frac_sphere_volume": dict(
-        title="Sphere fraction (volume-weighted)",
-        cbar=r"Volume fraction of spherical bubbles",
-        robust=False,
-        vmin=0.0,
-        vmax=1.0,
-        annotation_decimals=2,
+    "a_obs_m2_m3_mid": dict(
+        title="Local interfacial area density (prolate–oblate midpoint)",
+        cbar=r"Interfacial area [m$^{2}$ m$^{-3}$]",
+        estimand=metric_utils.condition_metric_population("a_obs_m2_m3_mid"),
+        robust=True,
+        vmin=None,
+        vmax=None,
+        annotation_decimals=1,
     ),
-    "frac_sphere_surface": dict(
-        title="Sphere fraction (surface-weighted)",
-        cbar=r"A$_\mathrm{sphere}$ / A$_\mathrm{total}$",
-        robust=False,
-        vmin=0.0,
-        vmax=1.0,
-        annotation_decimals=2,
+    "a_obs_m2_m3_band_pct": dict(
+        title="Interfacial area: prolate–oblate band width",
+        cbar=r"band half-width [$\pm$%]",
+        estimand=metric_utils.condition_metric_population("a_obs_m2_m3_band_pct"),
+        robust=True,
+        vmin=None,
+        vmax=None,
+        annotation_decimals=1,
     ),
-    "frac_sphere_count": dict(
-        title="Sphere fraction (count-based)",
-        cbar=r"N$_\mathrm{sphere}$ / N$_\mathrm{total}$",
-        robust=False,
-        vmin=0.0,
-        vmax=1.0,
-        annotation_decimals=2,
-    ),
+    # The sphere-fraction panels (frac_sphere_count/_volume/_surface) are deliberately NOT
+    # listed because reported quantities are classification-independent. The columns are
+    # still computed per frame, and `aspect_ratio` + `d_mm_sphere`
+    # are kept per bubble, so the split can be reconstructed at any cutoff on demand.
     "n_bubbles_per_mL": dict(
         title="Bubble number density",
         cbar="bubbles/mL",
+        estimand=metric_utils.condition_metric_population("n_bubbles_per_mL"),
         robust=True,
         vmin=None,
         vmax=None,
         annotation_decimals=2,
     ),
     "a_specific_m2_m3": dict(
-        title="Specific interfacial area (bubble surface / bubble volume)",
-        cbar=r"a$_\mathrm{specific}$ = A$_\mathrm{bubble}$ / V$_\mathrm{bubble}$ [m$^{2}$ m$^{-3}$]",
+        title="Gas-volume-specific interfacial area",
+        cbar=r"A / V$_\mathrm{gas}$ [m$^{2}$ m$^{-3}$]",
+        estimand=metric_utils.condition_metric_population("a_specific_m2_m3"),
         robust=True,
         vmin=None,
         vmax=None,
         annotate=False,
     ),
     "a_L_m2_m3": dict(
-        title="Specific interfacial area",
-        cbar=r"Specific interfacial area [m$^{2}$ m$^{-3}$]",
+        title="Liquid-volume interfacial area density",
+        cbar=r"Liquid-volume interfacial area density [m$^{2}$ m$^{-3}$]",
+        estimand=metric_utils.condition_metric_population("a_L_m2_m3"),
         robust=True,
         vmin=None,
         vmax=None,
@@ -287,6 +334,8 @@ def plot_all_xanthan_grids(
     outdir: Union[str, Path] = "visc_comparison",
     fname_prefix: str = "visc_compare_settings",
     color_map: Optional[dict] = None,
+    x_max_ticks: int = 5,  # cap on x-axis major tick labels per subplot
+    x_tick_step: Optional[float] = None,  # fixed x tick spacing [mm]; overrides x_max_ticks
 ):
     """
     For each (rpm, aeration) combination implicit in the 'setting' level of the MultiIndex,
@@ -377,6 +426,8 @@ def plot_all_xanthan_grids(
                 color_map=color_map,
                 xmax_percentile=xmax_percentile,
                 frequency=frequency,
+                x_max_ticks=x_max_ticks,
+                x_tick_step=x_tick_step,
             )
 
 
@@ -397,15 +448,19 @@ def grid_xanthan_by_placement(
     settings_title: Optional[str] = None,  # optional suptitle override when using `settings`
     xmax_percentile: Optional[float] = 99.5,
     frequency: bool = False,
+    x_max_ticks: int = 5,  # cap on x-axis major tick labels per subplot
+    x_tick_step: Optional[float] = None,  # fixed x tick spacing [mm]; overrides x_max_ticks
 ):
     """
-    Fixes included:
+    Behavior:
       - Histograms have distinct colors per column (viscosity label).
       - Mean dashed line is ALWAYS red.
-      - Xanthan values correctly assigned in settings-mode (labels derived from setting).
+      - Xanthan labels are derived from the setting.
       - Binning respects xlim_cap via xlim_eff.
       - Column headers shown as wt%.
       - No 'Replicate' titles stamped on every subplot.
+      - X tick spacing is explicit when `x_tick_step` is supplied; otherwise an adaptive
+        step derived from the shared x-range limits label density (see `x_max_ticks`).
     """
     import re
 
@@ -429,9 +484,9 @@ def grid_xanthan_by_placement(
         return str(s)
 
     _XANTHAN_WT = {
-        "000": "0.00",
+        "000": "0.000",
         "0125": "0.125",
-        "025": "0.25",
+        "025": "0.250",
     }
 
     def format_xanthan_wt(label: str) -> str:
@@ -619,10 +674,18 @@ def grid_xanthan_by_placement(
             if r == nrows - 1:
                 ax.set_xlabel("Bubble Diameter [mm]")
 
+    # X ticks: pick a step from the shared x-range so labels do not overlap in narrow
+    # subplots while limiting label density on wide distributions.
+    x_step = (
+        float(x_tick_step)
+        if x_tick_step is not None
+        else nice_tick_step(xlim_eff[1] - xlim_eff[0], max_ticks=x_max_ticks)
+    )
+
     for ax_row in axes:
         for ax in ax_row:
-            ax.xaxis.set_major_locator(matplotlib.ticker.MultipleLocator(0.5))
-            ax.xaxis.set_minor_locator(matplotlib.ticker.MultipleLocator(0.25))
+            ax.xaxis.set_major_locator(matplotlib.ticker.MultipleLocator(x_step))
+            ax.xaxis.set_minor_locator(matplotlib.ticker.MultipleLocator(x_step / 2))
             if frequency:
                 ax.yaxis.set_major_locator(matplotlib.ticker.MultipleLocator(0.1))
                 ax.yaxis.set_minor_locator(matplotlib.ticker.MultipleLocator(0.05))
@@ -675,7 +738,7 @@ def plot_metric_grid_from_agg(
     annotate_cells: bool = True,
     annotation_decimals: int = 1,
     auto_contrast: bool = True,
-    # NEW: Viscosity axis
+    # Viscosity axis
     viscosity_map: Optional[dict] = None,  # {xanthan_level: {rpm: viscosity}}
     viscosity_label: str = "µ (Pa·s)",
     viscosity_decimals: int = 3,
@@ -695,7 +758,7 @@ def plot_metric_grid_from_agg(
     Requires agg to contain:
       placement_col, xanthan_col, rpm_val_col, aer_val_col, metric_col
 
-    New parameter:
+    Viscosity mapping:
       viscosity_map: Dict mapping xanthan levels to {rpm: viscosity} dicts
                      Example: {
                          '000 xanthan': {75: 0.001, 100: 0.001, 125: 0.001, 150: 0.001},
@@ -964,6 +1027,368 @@ def plot_metric_grid_from_agg(
     return work
 
 
+def plot_metric_grid_from_agg_all_aeration(
+    agg: pandas.DataFrame,
+    *,
+    metric_col: str,
+    placement_col: str = "placement",
+    xanthan_col: str = "xanthan",
+    rpm_val_col: str = "rpm_val",
+    aer_val_col: str = "aer_val",
+    # ordering (soft)
+    placements: Optional[list] = None,
+    xanthan_order: Optional[list] = None,
+    # filtering (hard)
+    placements_keep: Optional[list] = None,
+    xanthan_levels: Optional[list] = None,
+    rpm_levels_keep: Optional[list] = None,
+    aer_levels_keep: Optional[list] = None,
+    # display maps
+    placement_label_map: Optional[dict] = None,
+    xanthan_label_map: Optional[dict] = None,
+    axis_label_map: Optional[dict] = None,
+    title: Optional[str] = None,
+    colorbar_label: Optional[str] = None,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    robust: bool = False,
+    missing_text: str = "no data",
+    # Cell annotations
+    annotate_cells: bool = True,
+    annotation_decimals: int = 1,
+    auto_contrast: bool = True,
+    annotation_fontsize: Optional[float] = None,
+    annotation_fontsize_limits: tuple[float, float] = (6.0, 8.0),
+    # Viscosity axis
+    viscosity_map: Optional[dict] = None,  # {xanthan_level: {rpm: viscosity}}
+    viscosity_label: str = "µ (Pa·s)",
+    viscosity_decimals: int = 3,
+    viscosity_label_pad: float = 10,
+    # PV map: replace rpm tick labels with P/V values per xanthan level
+    pv_map: Optional[dict] = None,  # {xanthan_level: {rpm: pv_value}}
+    # existing
+    dpi: int = 300,
+    max_fig_height_in: Optional[float] = None,
+    outpath: Optional[Union[str, Path]] = None,
+):
+    """
+    Full-aeration variant of :func:`plot_metric_grid_from_agg`.
+
+    Same grid (rows = placements, cols = xanthan levels, tiles = rpm x aeration), but
+    intended for the complete aeration series -- including the 80 L/min setpoint that the
+    reference figures drop. ``aer_levels_keep`` therefore defaults to ``None``, i.e. every
+    aeration level present in ``agg``.
+
+    Layout contract
+    ---------------
+    The figure footprint is byte-for-byte the same rule as the reference function:
+    width = ``A4_TEXT_WIDTH_IN``, height = ``(A4_TEXT_WIDTH_IN / n_xanthan) * 0.68 *
+    n_placements + 1.3``. That rule depends on the number of *tiles*, not on the number of
+    aeration rows inside a tile, so adding the fifth aeration level does not change the
+    figure size at all -- the heat map cells get shorter instead. For the 6 x 3 paper grid
+    that is 6.27 x 9.83 in either way, and a data cell goes from 25.3 x 19.6 pt (4 levels)
+    to 25.3 x 15.7 pt (5 levels).
+
+    Because the cells shrink, the in-cell annotations are sized from the *rendered* axes
+    box rather than fixed at 8 pt: the font is set to half the cell height, clipped to
+    ``annotation_fontsize_limits``. At four aeration levels that reproduces the reference
+    8 pt; at five it eases off to ~7.9 pt. Pass ``annotation_fontsize`` to override.
+
+    ``max_fig_height_in`` optionally clamps the height (e.g. to ``A4_TEXT_HEIGHT_IN``).
+    It is off by default so this variant stays visually flush with figures produced by the
+    reference function, which at six placement rows already runs slightly past the A4 text
+    block and is trimmed by ``bbox_inches="tight"`` on save.
+
+    ``title`` is accepted for signature compatibility with the reference function and, as
+    there, is deliberately not drawn -- a suptitle would change the height and break the
+    layout contract above. The metric name belongs in the figure caption.
+
+    Returns the filtered frame that was plotted, or ``None`` if nothing was left to plot.
+    """
+    req = [placement_col, xanthan_col, rpm_val_col, aer_val_col, metric_col]
+    missing = [c for c in req if c not in agg.columns]
+    if missing:
+        raise KeyError(f"agg missing required columns: {missing}")
+
+    work = agg.dropna(subset=req).copy()
+    if work.empty:
+        print("[skip] empty after dropping NaNs")
+        return None
+
+    # --- optional filtering (hard) ---
+    if placements_keep is not None:
+        work = work[work[placement_col].isin(placements_keep)]
+    if xanthan_levels is not None:
+        work = work[work[xanthan_col].isin(xanthan_levels)]
+    if rpm_levels_keep is not None:
+        work = work[work[rpm_val_col].isin(rpm_levels_keep)]
+    if aer_levels_keep is not None:
+        work = work[work[aer_val_col].isin(aer_levels_keep)]
+
+    if work.empty:
+        print("[skip] empty after applying level filters")
+        return None
+
+    def _disp(mapper, key):
+        return mapper.get(key, str(key)) if mapper else str(key)
+
+    # placements order (reverse numeric-ish)
+    all_p = list(work[placement_col].unique())
+
+    if placements_keep is not None:
+        placements_used = [p for p in placements_keep if p in all_p]
+    elif placements is not None:
+        primary = [p for p in placements if p in all_p]
+        rest = [p for p in all_p if p not in primary]
+        placements_used = primary + rest
+    else:
+        placements_used = all_p
+
+    def _placement_key(p):
+        import re
+
+        m = re.search(r"(\d+)$", str(p))
+        return int(m.group(1)) if m else 0
+
+    placements_used = list(reversed(sorted(placements_used, key=_placement_key)))
+
+    # xanthan order
+    all_x = sorted(work[xanthan_col].unique())
+    if xanthan_order is not None:
+        primary = [x for x in xanthan_order if x in all_x]
+        rest = [x for x in all_x if x not in primary]
+        xan_used = primary + rest
+    else:
+        xan_used = all_x
+
+    # axis levels -- aeration defaults to everything present, so 80 L/min is kept
+    rpm_levels = (
+        sorted(work[rpm_val_col].unique()) if rpm_levels_keep is None else list(rpm_levels_keep)
+    )
+    aer_levels = (
+        sorted(work[aer_val_col].unique()) if aer_levels_keep is None else list(aer_levels_keep)
+    )
+
+    # global color scale
+    vals = pandas.to_numeric(work[metric_col], errors="coerce").dropna()
+    if vals.empty:
+        print("[skip] metric_col has no numeric values")
+        return None
+
+    if vmin is None or vmax is None:
+        if robust:
+            lo, hi = numpy.percentile(vals.to_numpy(), [5, 95])
+        else:
+            lo, hi = float(vals.min()), float(vals.max())
+        if vmin is None:
+            vmin = float(lo)
+        if vmax is None:
+            vmax = float(hi)
+        if numpy.isclose(vmin, vmax):
+            vmin -= 1e-6
+            vmax += 1e-6
+
+    # Helper function for auto-contrast
+    def _get_text_color(value, vmin, vmax, cmap):
+        """Choose white or black text based on background luminance"""
+        if not auto_contrast:
+            return "white"
+        if numpy.isnan(value):
+            return "black"
+        norm_val = (value - vmin) / (vmax - vmin) if vmax > vmin else 0.5
+        norm_val = numpy.clip(norm_val, 0, 1)
+        rgba = cmap(norm_val)
+        r, g, b = rgba[:3]
+        luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        return "white" if luminance < 0.5 else "black"
+
+    nrows, ncols = len(placements_used), len(xan_used)
+    # Identical to the reference layout: depends on the tile grid, not on how many
+    # aeration rows sit inside a tile.
+    cell_height = (A4_TEXT_WIDTH_IN / ncols) * 0.68
+    fig_height = cell_height * nrows + 1.3
+    if max_fig_height_in is not None:
+        fig_height = min(fig_height, max_fig_height_in)
+
+    fig, axes = matplotlib.pyplot.subplots(
+        nrows=nrows, ncols=ncols, figsize=(A4_TEXT_WIDTH_IN, fig_height), sharex=False, sharey=True
+    )
+    if nrows == 1 and ncols == 1:
+        axes = numpy.array([[axes]])
+    elif nrows == 1:
+        axes = numpy.array([axes])
+    elif ncols == 1:
+        axes = numpy.array([[ax] for ax in axes])
+
+    xlab = axis_label_map.get("x", "rpm") if axis_label_map else "rpm"
+    ylab = axis_label_map.get("y", "l/min") if axis_label_map else "l/min"
+
+    last_im = None
+    last_cmap = None
+    # Cell values are kept so the annotation pass can run after tight_layout, once the
+    # true cell height (and hence a legible font size) is known.
+    matrices: dict[tuple[int, int], numpy.ndarray] = {}
+
+    for i, p in enumerate(placements_used):
+        for j, x in enumerate(xan_used):
+            ax = axes[i, j]
+            sub = work[(work[placement_col] == p) & (work[xanthan_col] == x)]
+
+            ax.set_xticks(numpy.arange(len(rpm_levels)))
+            ax.set_yticks(numpy.arange(len(aer_levels)))
+
+            if sub.empty:
+                ax.set_facecolor("#f0f0f0")
+                ax.text(
+                    0.5,
+                    0.5,
+                    missing_text,
+                    ha="center",
+                    va="center",
+                    transform=ax.transAxes,
+                    color=Colors.gray,
+                )
+            else:
+                mat = numpy.full((len(aer_levels), len(rpm_levels)), numpy.nan, dtype="float32")
+                for _, row in sub.iterrows():
+                    rv = row[rpm_val_col]
+                    av = row[aer_val_col]
+                    if rv not in rpm_levels or av not in aer_levels:
+                        continue
+                    r = rpm_levels.index(rv)
+                    a = aer_levels.index(av)
+                    mat[a, r] = float(row[metric_col])
+
+                im = ax.imshow(mat, origin="lower", vmin=vmin, vmax=vmax, aspect="auto")
+                last_im = im
+                last_cmap = im.get_cmap()
+                matrices[(i, j)] = mat
+
+            # titles/labels
+            if i == 0:
+                ax.set_title(_disp(xanthan_label_map, x), pad=11, fontsize=9)
+
+                # Add viscosity axis on top row
+                if viscosity_map is not None and x in viscosity_map:
+                    ax2 = ax.twiny()  # Create secondary x-axis
+                    ax2.set_xlim(ax.get_xlim())  # Match primary axis limits
+                    ax2.set_xticks(numpy.arange(len(rpm_levels)))
+                    ax2.tick_params(labelsize=9)
+
+                    # Create viscosity labels
+                    visc_labels = []
+                    for rpm in rpm_levels:
+                        if rpm in viscosity_map[x]:
+                            visc = viscosity_map[x][rpm]
+                            if viscosity_decimals == 0:
+                                visc_labels.append(f"{visc:.0f}")
+                            else:
+                                visc_labels.append(f"{visc:.{viscosity_decimals}f}")
+                        else:
+                            visc_labels.append("")
+
+                    ax2.set_xticklabels(visc_labels, fontsize=9)
+
+                    # Add viscosity label on ALL columns (not just first)
+                    ax2.set_xlabel(viscosity_label, labelpad=viscosity_label_pad, fontsize=9)
+
+            if j == 0:
+                ax.text(
+                    placement_level_x,
+                    0.5,
+                    _disp(placement_label_map, p),
+                    transform=ax.transAxes,
+                    rotation=90,
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                )
+                ax.set_ylabel(ylab)
+
+                ax.set_yticks(numpy.arange(len(aer_levels)))
+                ax.set_yticklabels(
+                    [str(int(v)) if float(v).is_integer() else str(v) for v in aer_levels],
+                    fontsize=9,
+                )
+                ax.tick_params(axis="y", labelleft=True, labelsize=9)
+            else:
+                ax.tick_params(axis="y", labelleft=False, labelsize=9)
+
+            if i == nrows - 1:
+                if pv_map is not None and x in pv_map:
+                    xtick_labels = [
+                        f"{pv_map[x][v]:.3f}" if v in pv_map[x] else str(v) for v in rpm_levels
+                    ]
+                else:
+                    xtick_labels = [
+                        str(int(v)) if float(v).is_integer() else str(v) for v in rpm_levels
+                    ]
+                ax.set_xticklabels(xtick_labels, ha="center", fontsize=9)
+                ax.set_xlabel(xlab)
+                ax.tick_params(axis="x", labelsize=9)
+            else:
+                ax.set_xticklabels([])
+
+    matplotlib.pyplot.tight_layout(rect=(0, 0, 0.94, 0.95))
+
+    # Annotate only once the layout is settled: the cell height that decides whether the
+    # numbers still fit is only known after tight_layout has sized the axes.
+    if annotate_cells and matrices:
+        if annotation_fontsize is None:
+            fig.canvas.draw()
+            axes_box = axes[0, 0].get_window_extent().transformed(fig.dpi_scale_trans.inverted())
+            cell_height_pt = axes_box.height * 72.0 / len(aer_levels)
+            lo_pt, hi_pt = annotation_fontsize_limits
+            # Half the cell height leaves roughly the cell's own height again as clearance
+            # above and below the digits; 8 pt (the reference value) is the cap.
+            fontsize = float(numpy.clip(0.5 * cell_height_pt, lo_pt, hi_pt))
+        else:
+            fontsize = float(annotation_fontsize)
+
+        for (i, j), mat in matrices.items():
+            ax = axes[i, j]
+            for a_idx in range(len(aer_levels)):
+                for r_idx in range(len(rpm_levels)):
+                    val = mat[a_idx, r_idx]
+                    if numpy.isnan(val):
+                        continue
+                    text_color = _get_text_color(val, vmin, vmax, last_cmap)
+
+                    if annotation_decimals == 0:
+                        text = f"{val:.0f}"
+                    else:
+                        text = f"{val:.{annotation_decimals}f}"
+
+                    ax.text(
+                        r_idx,
+                        a_idx,
+                        text,
+                        ha="center",
+                        va="center",
+                        color=text_color,
+                        fontsize=fontsize,
+                    )
+
+    if last_im is not None:
+        cax = fig.add_axes((0.945, 0.15, 0.015, 0.7))
+        cbar = fig.colorbar(last_im, cax=cax)
+        cbar.ax.tick_params(labelsize=9)
+        cbar.set_label(colorbar_label or metric_col)
+
+    if outpath is not None:
+        outpath = Path(outpath)
+        outpath.parent.mkdir(parents=True, exist_ok=True)
+        matplotlib.pyplot.savefig(
+            outpath,
+            dpi=dpi,
+            bbox_inches="tight",
+            pad_inches=0.02,
+        )
+        print("Wrote", outpath)
+
+    return work
+
+
 def plot_metric_grid_from_frames(
     frame_level_df: pandas.DataFrame,
     *,
@@ -1028,10 +1453,10 @@ def plot_metric_grid_from_frames(
         if missing:
             # Uses your module function, which depends on parse_setting.
             df = df.copy(deep=False)
-            df = metrics.enrich_with_setting_info(df, setting_col=setting_col)
+            df = metric_utils.enrich_with_setting_info(df, setting_col=setting_col)
 
     # Collapse frames -> one value per (placement, setting).
-    reduce_fn = metrics._resolve_reducer(reducer)
+    reduce_fn = metric_utils._resolve_reducer(reducer)
     per_setting = (
         df.groupby([placement_col, setting_col], observed=True, sort=False)[metric_col]
         .apply(reduce_fn)
@@ -1165,6 +1590,89 @@ def plot_metric_grid_from_frames(
     return outpath
 
 
+def setting_comparison_stem(settings: list[str], *, prefix: str = "", suffix: str = "") -> str:
+    """
+    Build the output file stem for a setting-comparison figure from the settings plotted.
+
+    ``plot_settings_comparison`` names only the parameter that *varies* in its legend, so
+    the held-fixed levels appear nowhere in the figure itself.  Deriving the stem from the
+    same list that is plotted puts them in the filename and keeps the two from drifting:
+    an agitation sweep records the aeration rate it was measured at, and an aeration sweep
+    records the stirrer speed.
+
+    Exactly one of agitation rate and aeration rate must vary across *settings*; the other
+    one and the xanthan concentration are the fixed levels written into the stem.
+
+    Parameters
+    ----------
+    settings : list of str
+        Reactor-setting strings exactly as passed to ``plot_settings_comparison``, e.g.
+        ``["75 rpm 55 lmin 000 xanthan", ..., "150 rpm 55 lmin 000 xanthan"]``.
+    prefix : str, optional
+        Fragment placed before the stem, e.g. ``"holdup_area_"`` to mark the figures
+        showing the derived gas-holdup and interfacial-area metrics.
+    suffix : str, optional
+        Fragment placed after the stem, e.g. ``"_all_aeration"`` to mark the full
+        five-setpoint aeration series against the four-setpoint reference layout.
+
+    Returns
+    -------
+    str
+        ``"{prefix}{swept}_at_{fixed}_{xanthan}_xanthan{suffix}"``, for example
+        ``"rpm_at_55_lmin_000_xanthan"`` or
+        ``"holdup_area_lmin_at_100_rpm_025_xanthan_all_aeration"``.  Contains no ``"."``,
+        so the caller can append an extension with ``Path.with_suffix``.
+
+    Raises
+    ------
+    ValueError
+        If fewer than two settings are given, if the xanthan concentration is not held
+        constant, or if the number of varying parameters is not exactly one.
+
+    Examples
+    --------
+    >>> setting_comparison_stem(["75 rpm 55 lmin 000 xanthan", "150 rpm 55 lmin 000 xanthan"])
+    'rpm_at_55_lmin_000_xanthan'
+    >>> setting_comparison_stem(
+    ...     ["100 rpm 45 lmin 025 xanthan", "100 rpm 90 lmin 025 xanthan"],
+    ...     prefix="holdup_area_",
+    ... )
+    'holdup_area_lmin_at_100_rpm_025_xanthan'
+    """
+    if len(settings) < 2:
+        raise ValueError(f"need at least two settings to define a sweep, got {settings!r}")
+
+    parsed = [parse_setting(s) for s in settings]  # ("75 rpm", "55 lmin", "000 xanthan")
+    rpm_levels = {rpm for rpm, _, _ in parsed}
+    lmin_levels = {lmin for _, lmin, _ in parsed}
+    xanthan_levels = {xanthan for _, _, xanthan in parsed}
+
+    if len(xanthan_levels) != 1:
+        raise ValueError(
+            f"xanthan concentration must be held constant within one figure, "
+            f"got {sorted(xanthan_levels)}"
+        )
+
+    varying = [
+        name for name, levels in (("rpm", rpm_levels), ("lmin", lmin_levels)) if len(levels) > 1
+    ]
+    if len(varying) != 1:
+        raise ValueError(
+            f"exactly one of agitation and aeration rate must vary, {len(varying)} do "
+            f"({varying or 'none'}); the stem cannot say what is on the x axis"
+        )
+
+    swept = varying[0]
+    fixed = next(iter(lmin_levels if swept == "rpm" else rpm_levels))
+    xanthan = next(iter(xanthan_levels))
+
+    stem = f"{prefix}{swept}_at_{fixed}_{xanthan}{suffix}".replace(" ", "_")
+    if "." in stem:
+        # Callers pass the stem to Path.with_suffix, which would truncate at the dot.
+        raise ValueError(f"figure stem {stem!r} contains '.', which would break the extension")
+    return stem
+
+
 def plot_settings_comparison(
     df: pandas.DataFrame,
     settings: list[str],
@@ -1172,15 +1680,19 @@ def plot_settings_comparison(
     y_labels: list[str],
     placements: Optional[list[str]] = None,
     *,
+    n_eff_lookup: Optional[dict] = None,
+    band_lookup: Optional[dict] = None,
+    estimand: str = "frame_mean",
     figsize: tuple[float, float] = (A4_TEXT_WIDTH_IN, 5),
     dpi: int = 150,
     capsize: int = 4,
+    dodge: float = 0.5,
     legend_ncol: Optional[int] = None,
     outpath: Optional[Union[str, Path]] = None,
     show: bool = True,
 ) -> matplotlib.pyplot.Figure:
     """
-    Plot mean ±95% CI for one or more metrics across reactor placements,
+    Plot a condition estimate ±95% CI for one or more metrics across reactor placements,
     with one line per reactor setting.
 
     Typically used to compare how a single varied parameter (e.g. agitation
@@ -1207,6 +1719,38 @@ def plot_settings_comparison(
     placements : list of str, optional
         Ordered list of placement identifiers to show on the x-axis.
         Defaults to all unique values found in ``df["placement"]``, sorted.
+    n_eff_lookup : dict, optional
+        Mapping ``(metric, setting, placement) -> N_eff`` giving the effective
+        autocorrelation-adjusted sample size for each error bar. When supplied,
+        the 95% CI uses ``N_eff`` in place of the raw frame count ``n`` (clamped to
+        ``(1, n]``). Built from ``temporal_independence_full_grid.csv``,
+        summing each stream's N_eff over replicates. If ``None`` (default) the naive
+        ``sqrt(n)`` CI is used, i.e. every frame treated as independent.
+    band_lookup : dict, optional
+        Mapping ``(metric, setting, placement) -> (lower, upper)`` giving a *systematic*
+        interval to draw behind the confidence interval, as a wider translucent bar
+        without caps. Intended for the prolate-oblate depth band on gas holdup and
+        observed-volume interfacial area density, whose value is bracketed by the two admissible
+        completions of the silhouette. Endpoints are absolute values in the metric's own
+        units and must bracket the plotted mean (``ValueError`` otherwise). Entries
+        missing from the mapping are not drawn, so metrics that have no band -- bubble
+        count, mean diameter -- can share the same call.
+
+        The two intervals are deliberately *not* combined: the confidence interval is
+        sampling uncertainty and shrinks as frames accumulate, while the band is a
+        bounded systematic range from an axis that is never observed and does not shrink
+        at all. Feed this from ``data/public/headline_numbers_by_condition.csv``. It is
+        NOT the per-frame ``*_band_pct`` column, a different quantity that diverges from
+        it by up to a factor of three.
+    estimand : {"frame_mean", "condition"}, optional
+        Point-estimate policy. ``"frame_mean"`` preserves the generic arithmetic mean of
+        the supplied per-frame metric. ``"condition"`` applies
+        :func:`klarity.metrics.condition_metric_estimand`: registered population and ratio
+        metrics are formed from summed physical numerators and denominators, while additive
+        local quantities give equal weight to every valid observed frame volume. Its CI is
+        a delete-one-frame jackknife widened by ``N_eff``. Public figures use
+        ``"condition"``; ``"frame_mean"`` remains available for exploratory typical-frame
+        plots.
     figsize : tuple of float, optional
         Figure size ``(width, height)`` in inches.  Default ``(A4_TEXT_WIDTH_IN, 5)``.
     dpi : int, optional
@@ -1214,6 +1758,16 @@ def plot_settings_comparison(
         Default ``150``.
     capsize : int, optional
         Cap width for the error bars.  Default ``4``.
+    dodge : float, optional
+        Horizontal spread of the settings within each placement, in x-axis units where
+        adjacent placements are 1.0 apart. Settings are placed symmetrically about the
+        tick, so the group spans ``dodge`` and the tick keeps marking the placement
+        itself. Default ``0.5``, which leaves half a placement's width of clear space
+        between neighbouring groups.
+
+        Without it every setting is drawn at the same x and the markers and their two
+        intervals overlap into an unreadable stack -- the more so with five aeration
+        setpoints and a band. Set ``0`` for the un-dodged layout.
     legend_ncol : int, optional
         Number of columns in the shared legend.  Defaults to
         ``len(settings)`` so all entries sit in a single row.
@@ -1242,7 +1796,7 @@ def plot_settings_comparison(
     ...     ],
     ...     metrics=["mean_diameter_mm", "n_bubbles_total"],
     ...     y_labels=[r"$\\overline{d}$ [mm]", "Number of bubbles per frame [-]"],
-    ...     outpath="setting_comparison/rpm_000_xanthan.png",
+    ...     outpath="setting_comparison/rpm_at_55_lmin_000_xanthan.png",
     ... )
     """
     import math as _math
@@ -1287,6 +1841,8 @@ def plot_settings_comparison(
 
     if len(metrics) != len(y_labels):
         raise ValueError("`metrics` and `y_labels` must have the same length.")
+    if estimand not in {"frame_mean", "condition"}:
+        raise ValueError("`estimand` must be 'frame_mean' or 'condition'.")
 
     if placements is None:
         placements = sorted(df["placement"].unique())
@@ -1297,45 +1853,148 @@ def plot_settings_comparison(
     x = numpy.arange(len(placements))
     x_labels = [p.replace("placement_", "Position ") for p in placements]
 
+    # Horizontal offset per setting, symmetric about the placement tick, so overlapping
+    # markers and intervals separate without the tick ceasing to mark the placement.
+    if len(settings) > 1 and dodge:
+        x_offsets = numpy.linspace(-dodge / 2.0, dodge / 2.0, len(settings))
+    else:
+        x_offsets = numpy.zeros(len(settings))
+
     fig, axes = matplotlib.pyplot.subplots(len(metrics), 1, figsize=figsize, sharex=True, dpi=dpi)
     # Ensure axes is always a list, even for a single metric.
     if len(metrics) == 1:
         axes = [axes]
 
+    drew_band = False
     for metric, y_label, ax in zip(metrics, y_labels, axes):
-        for setting, color in zip(settings, color_cycle):
+        # A band_lookup that carries entries for this metric but matches none of the
+        # plotted points means the keys disagree -- a setting string formatted differently
+        # ("45.0 lmin" vs "45 lmin"), or placements that never line up. That silently
+        # produces a band-free figure of exactly the kind this parameter exists to prevent,
+        # so it is caught below rather than shipped.
+        band_expected = band_lookup is not None and any(k[0] == metric for k in band_lookup)
+        band_matched = False
+        for (setting, color), x_offset in zip(zip(settings, color_cycle), x_offsets):
+            x_series = x + x_offset
             means, ci_lows, ci_highs = [], [], []
+            band_lows, band_highs = [], []
             for placement in placements:
-                data = df[(df["placement"] == placement) & (df["reactor_setting"] == setting)][
-                    metric
-                ].dropna()
-
-                n = len(data)
-                mean = data.mean() if n > 0 else float("nan")
-                ci = 1.96 * data.std() / _math.sqrt(n) if n > 1 else 0.0
+                group = df[(df["placement"] == placement) & (df["reactor_setting"] == setting)]
+                data = group[metric].dropna()
+                n = len(group) if estimand == "condition" else len(data)
+                # 95% CI of the selected estimand. Frames are temporally autocorrelated,
+                # so the naive independent-frame interval is too narrow. When an
+                # N_eff lookup is supplied (per plot-metric, setting, placement; summed over
+                # replicates), use the effective sample size instead -- clamped to (1, n]
+                # so we never claim more independence than frames observed. The condition
+                # estimand uses a ratio jackknife; frame_mean uses its ordinary standard
+                # error. A supplied lookup must contain every requested condition.
+                denom = float(n)
+                if n_eff_lookup is not None:
+                    key = (metric, setting, placement)
+                    if key not in n_eff_lookup:
+                        raise KeyError(f"N_eff is missing for {key!r}")
+                    n_eff = float(n_eff_lookup[key])
+                    if not numpy.isfinite(n_eff) or n_eff <= 0:
+                        raise ValueError(f"N_eff must be finite and positive for {key!r}")
+                    denom = min(n_eff, float(n))
+                if estimand == "condition" and n > 0:
+                    mean = metric_utils.condition_metric_estimand(group, metric)
+                    standard_error = metric_utils.condition_metric_standard_error(
+                        group, metric, n_eff=denom
+                    )
+                    ci = 1.96 * standard_error if n > 1 else 0.0
+                else:
+                    mean = data.mean() if n > 0 else float("nan")
+                    ci = 1.96 * data.std() / _math.sqrt(denom) if n > 1 else 0.0
                 means.append(mean)
                 ci_lows.append(mean - ci)
                 ci_highs.append(mean + ci)
+
+                # Systematic depth-model interval, if one is supplied for this metric.
+                # Absolute endpoints, not offsets; missing entries stay NaN and are simply
+                # not drawn (the count and diameter metrics have no band at all).
+                lo, hi = float("nan"), float("nan")
+                if band_lookup is not None:
+                    entry = band_lookup.get((metric, setting, placement))
+                    if entry is not None:
+                        lo, hi = (float(v) for v in entry)
+                band_lows.append(lo)
+                band_highs.append(hi)
 
             means_arr = numpy.array(means)
             ci_lows_arr = numpy.array(ci_lows)
             ci_highs_arr = numpy.array(ci_highs)
             y_err = numpy.array([means_arr - ci_lows_arr, ci_highs_arr - means_arr])
 
+            # Band first, so the sampling interval reads on top of it.
+            band_lows_arr = numpy.array(band_lows)
+            band_highs_arr = numpy.array(band_highs)
+            finite = numpy.isfinite(band_lows_arr) & numpy.isfinite(band_highs_arr)
+            if finite.any():
+                band_err = numpy.array([means_arr - band_lows_arr, band_highs_arr - means_arr])
+                # The band must bracket the plotted point: it is built from the same
+                # condition-level summed contributions as the plotted midpoint.
+                # A negative offset means the band and the plotted series were built from
+                # different quantities, which would be silently misleading -- so fail loudly
+                # rather than draw a bar pointing the wrong way.
+                scale = numpy.nanmax(numpy.abs(means_arr[finite]))
+                if numpy.nanmin(band_err[:, finite]) < -_BAND_REL_TOL * scale:
+                    raise ValueError(
+                        f"band_lookup interval does not bracket the plotted mean for "
+                        f"metric {metric!r}, setting {setting!r}; the band is centred on a "
+                        f"different quantity than the series being plotted."
+                    )
+                ax.errorbar(
+                    x_series[finite],
+                    means_arr[finite],
+                    yerr=numpy.clip(band_err[:, finite], 0.0, None),
+                    fmt="none",
+                    ecolor=color,
+                    elinewidth=4,
+                    alpha=0.30,
+                    capsize=0,
+                    zorder=1,
+                )
+                drew_band = True
+                band_matched = True
+
             ax.errorbar(
-                x,
+                x_series,
                 means_arr,
                 yerr=y_err,
-                marker="o",
-                fmt=".",
+                fmt="o",
                 capsize=capsize,
                 color=color,
                 label=_format_setting(setting),
+                zorder=2,
+            )
+
+        if band_expected and not band_matched:
+            raise ValueError(
+                f"band_lookup has entries for metric {metric!r} but none matched the "
+                f"plotted points, so no band would be drawn. Check that the lookup's "
+                f"setting and placement keys match those being plotted, e.g. "
+                f"{(metric, settings[0], placements[0])!r}."
             )
 
         ax.set_xticks(x)
         ax.set_xticklabels(x_labels, rotation=45, ha="right", color=Colors.gray)
         ax.set_ylabel(y_label)
+
+    # When both intervals are present the figure has to say which is which, otherwise the
+    # wide pale bar reads as a bigger error bar. Kept as a separate legend on the first
+    # axes so the shared setting legend below stays a single row.
+    if drew_band:
+        interval_key = [
+            matplotlib.lines.Line2D(
+                [], [], color=Colors.gray, lw=4, alpha=0.30, label="prolate–oblate band"
+            ),
+            matplotlib.lines.Line2D([], [], color=Colors.gray, lw=1.5, label="95% CI"),
+        ]
+        axes[0].add_artist(
+            axes[0].legend(handles=interval_key, loc="upper left", frameon=False, fontsize=8)
+        )
 
     # Shared legend below the figure (single row by default).
     handles, labels = axes[0].get_legend_handles_labels()

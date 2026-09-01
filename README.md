@@ -2,102 +2,118 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19709975.svg)](https://doi.org/10.5281/zenodo.19709975)
 
-**kLarity** is an open-source pipeline for automated detection, segmentation, and characterisation of gas bubbles in endoscope images from pilot-scale stirred bioreactors. It combines a fine-tuned YOLOv11 instance segmentation model with ellipse fitting to estimate bubble size distributions across multiple camera placements and operating conditions.
+**kLarity** detects, segments, and characterizes gas bubbles in endoscope images from
+pilot-scale stirred bioreactors. It combines a YOLO instance-segmentation model with a
+two-half-ellipse fit to estimate bubble size, gas volume, and interfacial area across
+camera placements and operating conditions.
 
-This repository accompanies the paper:
-
-> Emilie Overgaard Willer, Maximilian Siska, Juliet J. Victoria, Eric von Lieres, and John M. Woodley.
-> **From Global Averages to Local Reality: Machine Learning Driven Quantification of Bubble Dynamics in a Pilot Scale Stirred Bioreactor.**
-> DOI: [placeholder — will be updated upon publication]
-
----
+The repository accompanies *Machine Learning Driven Quantification of Local Bubble Dynamics across a Pilot Scale Stirred Bioreactor* by Emilie Overgaard
+Willer, Maximilian Siska, Benjamin Petersen, Juliet J. Victoria, Eric von Lieres, and John M. Woodley.
 
 ## Installation
 
 ```bash
-git clone https://github.com/<org>/klarity.git
-cd klarity
+git clone https://github.com/maxsiska/kLarity.git
+cd kLarity
 pip install -e .
 ```
 
-> **GPU:** `ultralytics` installs a CPU-only PyTorch build by default. For GPU inference, install the appropriate CUDA-enabled torch version *before* running `pip install -e .` — see the [PyTorch installation guide](https://pytorch.org/get-started/locally/).
-
----
+For CUDA inference, install the appropriate PyTorch build before installing kLarity. CPU
+and Apple MPS are selected automatically when CUDA is unavailable.
 
 ## Workflow
 
-The pipeline runs in three stages. Complete them in order.
+Run commands from the repository root.
 
-### 1 — Detect and segment bubbles
+1. Process extracted image directories:
 
-```bash
-python scripts/process_images.py
-```
+   ```bash
+   python scripts/process_images.py
+   # or
+   python scripts/process_images_parallel.py --devices auto
+   ```
 
-Reads raw endoscope images from `images/`, runs the kLarity model, and writes per-replicate detection CSVs and Parquet files to `output/` and `output_parquet/`. Optional overlay images are saved to `overlays/`.
+   One Parquet file is written per replicate under `output/`. Set
+   `KLARITY_OUTPUT_DIR=/path/to/output` to use another location.
 
-### 2 — Build analysis dataframes
+   `notebooks/process_images.ipynb` is an optional interactive wrapper around the same
+   processing functions. For normal and reproducible runs, use the script above; do not
+   run both entry points against the same unprocessed dataset.
 
-```bash
-python scripts/build_dataframes.py
-```
+2. Build the analysis tables:
 
-Aggregates the Parquet outputs into two pickle files (`bubble_level_df.pkl`, `frame_level_df.pkl`) in `data/`, which are used by all downstream notebooks.
+   ```bash
+   python scripts/build_frame_census.py
+   python scripts/build_dataframes.py --force
+   ```
 
-### 3 — Analyse results in notebooks
+   The frame inventory ensures that every usable input image contributes correctly to
+   frame-based averages. It reads the images without running model inference. The build
+   writes the large bubble-level table as Parquet and the smaller frame table as a pickle.
+   Both are written atomically, so an interrupted build cannot replace a valid table with
+   a truncated file.
 
-Open the notebooks in `notebooks/` in the following order:
+3. Build the compact condition and temporal tables:
 
-| Notebook | Description |
-|---|---|
-| `setting_comparison.ipynb` | Bubble size distributions across operating conditions |
-| `create_heatmaps.ipynb` | Spatial heatmaps of bubble density and size |
-| `compare_viscosities.ipynb` | Effect of xanthan concentration on bubble dynamics |
-| `xanthan_rheology.ipynb` | Rheological characterisation of xanthan solutions |
+   ```bash
+   python scripts/build_headline_table.py
+   python scripts/build_temporal_independence.py
+   ```
 
----
+4. Run the notebooks in `notebooks/` as needed. They read paths from `config.py` and compact
+   reference tables from `data/public/`.
+
+5. Record the files and settings used for a processed dataset:
+
+   ```bash
+   python scripts/build_dataset_manifest.py
+   ```
+
+## Geometry and filtering
+
+The split-ellipse fit supplies the in-plane major-axis length `a` and semi-minor axes `b1`
+and `b2`. The unobserved depth is represented by two spheroid models:
+
+- Prolate: `V = (pi*a/3)*(b1^2+b2^2)`. Surface area uses the smooth, volume-equivalent
+  symmetric spheroid with radius `sqrt((b1^2+b2^2)/2)`.
+- Oblate: `V = (pi*a^2/6)*(b1+b2)`. Surface area is the sum of the two half-oblate
+  spheroids sharing an equatorial circle of radius `a/2`.
+
+Volume and surface-area intervals are ordered independently. Their midpoint is the primary
+reported estimate, while the interval represents sensitivity to the two depth assumptions.
+Invalid or incomplete model pairs remain missing rather than being converted to zero.
+
+Frames below the configured mean-intensity threshold are classified as blank. Zero-area
+masks are not measurable bubbles. Border contacts with
+`border_contact_px/equivalent_diameter > 1` are excluded; moderate contacts are retained
+without off-frame reconstruction. The source Parquets retain the measurements needed to
+inspect these decisions.
 
 ## Data and model weights
 
-Raw images, processed data files, and model weights are not included in this repository due to their size.
+Large assets are distributed separately:
 
-| Asset | Source |
+| Asset | Location |
 |---|---|
-| Raw images | See [`images/README.md`](images/README.md) |
-| Processed data | See [`data/README.md`](data/README.md) |
-| Model weights | See [`models/README.md`](models/README.md) |
-| Annotation dataset (KLarity-18) | See [`model_eval/README.md`](model_eval/README.md) |
+| Raw images | [`images/README.md`](images/README.md) |
+| Processed data | [`output/README.md`](output/README.md) |
+| Analysis tables | [`data/README.md`](data/README.md) |
+| Model weights | [`models/README.md`](models/README.md) |
+| KLarity-18 annotations | [`model_eval/README.md`](model_eval/README.md) |
 
----
+Each processed dataset includes `dataset_manifest.json` with schema, parameters,
+software versions, source commit, row counts, and SHA-256 checksums.
 
-## Repository structure
+## Development checks
 
+```bash
+python -m pytest
+black --check config.py klarity scripts tests
+ruff check config.py klarity scripts tests
+mypy --explicit-package-bases config.py klarity scripts
 ```
-klarity/                  Core Python package (parsing, geometry, metrics, I/O, viz)
-scripts/                  Processing, training, and evaluation scripts
-notebooks/                Analysis notebooks
-model_eval/               Annotated evaluation dataset (KLarity-18) and benchmark script
-config.py                 Central configuration (paths, inference parameters)
-data/                     Processed data files          (not tracked — see data/README.md)
-models/                   Model weights                 (not tracked — see models/README.md)
-images/                   Raw endoscope images          (not tracked — see images/README.md)
-output/                   Per-replicate detection CSVs  (generated by process_images.py)
-overlays/                 Detection overlay images      (generated by process_images.py)
-heatmaps/                 Heatmap figures               (generated by create_heatmaps.ipynb)
-visc_comparison/          Viscosity comparison figures  (generated by compare_viscosities.ipynb)
-setting_comparison/       Setting comparison figures    (generated by setting_comparison.ipynb)
-training_results/         Model training outputs        (generated by train_model.py)
-```
-
----
 
 ## License
 
-This project is licensed under the GNU Affero General Public License v3.0 — see [LICENSE](LICENSE) for details.
-
----
-
-## Citation
-
-To cite this repository or reuse its content in your own work, please refer to the latest release:
-➡ [Zenodo Link](https://doi.org/10.5281/zenodo.19709975)
+kLarity is licensed under the GNU Affero General Public License v3.0. See
+[`LICENSE.md`](LICENSE.md).
