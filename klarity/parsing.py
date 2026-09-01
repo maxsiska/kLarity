@@ -632,7 +632,10 @@ def process_image(
     save_masks_overlay : bool, optional
         If True, writes a semi-transparent mask overlay.
     save_fit_overlay : bool, optional
-        If True, writes sphere/ellipsoid overlays derived from measurements.
+        If True, writes the fitted ellipsoid for every successful in-plane fit. A
+        circle is drawn only when the ellipsoid fit failed and the sphere fallback is
+        the sole available measurement. Overlay geometry is independent of the legacy
+        sphere/ellipsoid classification used by ``model_used`` and ``*_chosen``.
     pixel_size_mm : Optional[float], optional
         Pixel size in mm/pixel. If provided, mm-based metrics are computed.
     geom_mode : str, optional
@@ -780,7 +783,9 @@ def process_image(
                 V_pro, S_pro = volume_surface_prolate(a_mm, b1_mm, b2_mm)
                 V_pro, S_pro = float(V_pro), float(S_pro)
 
-        # Choose model + draw overlay (center = mask centroid for stability)
+        # Choose the legacy model used by the ``*_chosen`` output columns. Fit overlays
+        # are drawn independently below: every successful in-plane fit is shown as an
+        # ellipsoid, including masks classified as spheres by this compatibility path.
         model_used = "unknown"
         V_ch = S_ch = float("nan")
         d_mm_ch = float("nan")
@@ -788,20 +793,11 @@ def process_image(
         # _spheroid_band). Set alongside the chosen model in each branch below.
         band = _spheroid_band_unset()
 
-        def _draw_circle_if(img_rgb: numpy.ndarray) -> numpy.ndarray:
-            """Draw sphere overlay in pixel space if we have mm diameter + pixel size."""
-            if save_fit_overlay and overlay_dir and ps is not None and not math.isnan(d_mm_sph):
-                r_px = (d_mm_sph / 2.0) / ps
-                return draw_circle_overlay(img_rgb, centroid_x, centroid_y, r_px, thickness=2)
-            return img_rgb
-
         if geom_mode == "sphere_only":
             model_used = "sphere"
             V_ch, S_ch = V_sph, S_sph
             d_mm_ch = d_mm_sph
             band = _spheroid_band(True, d_mm_sph, V_sph, S_sph, V_pro, S_pro, V_ell, S_ell)
-            if fit_overlay is not None:
-                fit_overlay = _draw_circle_if(fit_overlay)
 
         elif geom_mode == "ellipsoid_only":
             model_used = "asym_ellipsoid" if est is not None else "sphere_fallback"
@@ -810,25 +806,10 @@ def process_image(
                 if V_ch > 0.0:
                     d_mm_ch = (6.0 * V_ch / math.pi) ** (1.0 / 3.0)
                 band = _spheroid_band(False, d_mm_sph, V_sph, S_sph, V_pro, S_pro, V_ell, S_ell)
-                if save_fit_overlay and overlay_dir and ps is not None and fit_overlay is not None:
-                    a_px, b1_px, b2_px = a_mm / ps, b1_mm / ps, b2_mm / ps
-                    fit_overlay = draw_asymmetric_ellipsoid_overlay(
-                        fit_overlay,
-                        cx_fit,
-                        cy_fit,
-                        ang_deg,
-                        a_px,
-                        b1_px,
-                        b2_px,
-                        thickness=2,
-                        show_axes=show_axes,
-                    )
             elif ps is not None and not math.isnan(d_mm_sph):
                 V_ch, S_ch = V_sph, S_sph
                 d_mm_ch = d_mm_sph
                 band = _spheroid_band(True, d_mm_sph, V_sph, S_sph, V_pro, S_pro, V_ell, S_ell)
-                if fit_overlay is not None:
-                    fit_overlay = _draw_circle_if(fit_overlay)
 
         else:  # "hybrid"
             if _use_sphere_model(size_thresh, near, d_mm_sph):
@@ -836,8 +817,6 @@ def process_image(
                 V_ch, S_ch = V_sph, S_sph
                 d_mm_ch = d_mm_sph
                 band = _spheroid_band(True, d_mm_sph, V_sph, S_sph, V_pro, S_pro, V_ell, S_ell)
-                if fit_overlay is not None:
-                    fit_overlay = _draw_circle_if(fit_overlay)
             else:
                 model_used = "asym_ellipsoid" if est is not None else "sphere_fallback"
                 if est is not None:
@@ -845,30 +824,34 @@ def process_image(
                     if V_ch > 0.0:
                         d_mm_ch = (6.0 * V_ch / math.pi) ** (1.0 / 3.0)
                     band = _spheroid_band(False, d_mm_sph, V_sph, S_sph, V_pro, S_pro, V_ell, S_ell)
-                    if (
-                        save_fit_overlay
-                        and overlay_dir
-                        and ps is not None
-                        and fit_overlay is not None
-                    ):
-                        a_px, b1_px, b2_px = a_mm / ps, b1_mm / ps, b2_mm / ps
-                        fit_overlay = draw_asymmetric_ellipsoid_overlay(
-                            fit_overlay,
-                            cx_fit,
-                            cy_fit,
-                            ang_deg,
-                            a_px,
-                            b1_px,
-                            b2_px,
-                            thickness=2,
-                            show_axes=show_axes,
-                        )
                 elif ps is not None and not math.isnan(d_mm_sph):
                     V_ch, S_ch = V_sph, S_sph
                     d_mm_ch = d_mm_sph
                     band = _spheroid_band(True, d_mm_sph, V_sph, S_sph, V_pro, S_pro, V_ell, S_ell)
-                    if fit_overlay is not None:
-                        fit_overlay = _draw_circle_if(fit_overlay)
+
+        # The overlay is a fit diagnostic, not a visualization of the legacy hybrid
+        # classification. Draw every available two-half-ellipse fit. Only a genuinely
+        # failed ellipse fit uses the circle fallback, because in that case the
+        # area-equivalent sphere is the sole available geometry.
+        if save_fit_overlay and overlay_dir and ps is not None and fit_overlay is not None:
+            if est is not None:
+                a_px, b1_px, b2_px = a_mm / ps, b1_mm / ps, b2_mm / ps
+                fit_overlay = draw_asymmetric_ellipsoid_overlay(
+                    fit_overlay,
+                    cx_fit,
+                    cy_fit,
+                    ang_deg,
+                    a_px,
+                    b1_px,
+                    b2_px,
+                    thickness=2,
+                    show_axes=show_axes,
+                )
+            elif not math.isnan(d_mm_sph):
+                r_px = (d_mm_sph / 2.0) / ps
+                fit_overlay = draw_circle_overlay(
+                    fit_overlay, centroid_x, centroid_y, r_px, thickness=2
+                )
 
         # Assemble the public row schema.
         if not math.isfinite(area_px) or area_px <= 0.0:
